@@ -2,8 +2,8 @@
 
 Protocol, storage and security core of the personal agent aggregator: the
 wire contract, validation, `AggregatorService` (work items, checkpoints,
-questions and approvals, handoff jobs, inbox, webhooks and MCP event
-subscriptions), Postgres and SQLite drivers with row-level security on
+questions and approvals, handoff jobs, conversations, inbox, webhooks and MCP
+event subscriptions), Postgres and SQLite drivers with row-level security on
 Postgres, dual-era MCP over Streamable HTTP, a framework-free REST handler,
 OAuth 2.1 helpers, Standard Webhooks signing, SSRF-guarded outbound requests
 and the deterministic agent CLI. No runtime dependencies; Node.js 20+

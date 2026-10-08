@@ -24,6 +24,9 @@ import type { AgentPrincipal, AggregatorService } from "./service.js";
  *   GET    /v1/jobs                       ?status=
  *   GET    /v1/jobs/{id}
  *   POST   /v1/jobs/{id}/cancel
+ *   GET    /v1/messages                   owner messages to this agent not yet replied to
+ *   POST   /v1/messages                   {text, reply_to? | thread_id?, kind?, id?} → posted into the owner's thread
+ *   POST   /v1/messages/{id}/ack          mark one of the owner's messages as being worked on
  *   PUT    /v1/webhook                    {url, auth_header_name?, auth_header_value?} → signing secret (once)
  *   DELETE /v1/webhook
  */
@@ -74,6 +77,9 @@ const ROUTES: Array<{ method: string; pattern: RegExp; key: string; handler: Han
   { method: "GET", pattern: /^\/v1\/jobs$/, key: "jobs.list", handler: async (p, _a, r, s) => ({ body: { jobs: await s.listJobs(p, r.query) } }) },
   { method: "GET", pattern: new RegExp(`^/v1/jobs/${SEGMENT}$`), key: "jobs.get", handler: async (p, a, _r, s) => ({ body: { job: await s.getJob(p, a[0]!) } }) },
   { method: "POST", pattern: new RegExp(`^/v1/jobs/${SEGMENT}/cancel$`), key: "jobs.cancel", handler: async (p, a, _r, s) => ({ body: { job: await s.cancelJob(p, a[0]!) } }) },
+  { method: "GET", pattern: /^\/v1\/messages$/, key: "messages.check", handler: async (p, _a, r, s) => ({ body: await s.checkMessages(p, r.query) }) },
+  { method: "POST", pattern: /^\/v1\/messages$/, key: "messages.post", handler: async (p, _a, r, s) => { const out = await s.postMessage(p, r.body); return { status: out.created ? 201 : 200, body: out }; } },
+  { method: "POST", pattern: /^\/v1\/messages\/([0-9a-f-]{36})\/ack$/, key: "messages.ack", handler: async (p, a, _r, s) => ({ body: await s.acknowledgeMessage(p, { message_id: a[0] }) }) },
   { method: "PUT", pattern: /^\/v1\/webhook$/, key: "webhook.set", handler: async (p, _a, r, s) => ({ body: await s.setWebhook(p, r.body) }) },
   { method: "DELETE", pattern: /^\/v1\/webhook$/, key: "webhook.clear", handler: async (p, _a, _r, s) => ({ body: await s.clearWebhook(p) }) },
 ];

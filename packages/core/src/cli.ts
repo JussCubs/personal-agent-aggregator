@@ -57,7 +57,7 @@ Report
   snapshot --file PATH|-      Push an explicit JSON snapshot (tasks, goals, projects, identity, memory_summary, connected_apps)
 
 Ask
-  ask --id ID --prompt TEXT [--option id=Label ...] [--approval] [--no-free-text] [--details TEXT] [--item ID] [--action TEXT] [--digest D] [--urgency low|normal|high] [--expires-in SECONDS]
+  ask --id ID --prompt TEXT [--option id=Label ...] [--approval] [--no-free-text] [--details TEXT] [--item ID] [--thread ID] [--action TEXT] [--digest D] [--urgency low|normal|high] [--expires-in SECONDS]
   answer --id ID [--wait SECONDS] [--interval SECONDS]   Exit 0 answered (JSON on stdout), 3 still pending, 5 cancelled/expired
   ack --id ID [--revision N]
   cancel --id ID
@@ -66,6 +66,12 @@ Inbox
   inbox [--cursor-file PATH] [--limit N] [--exec CMD]     Exit 0 new events (JSON lines), 3 nothing new. With --exec, the cursor only advances if CMD exits 0
   install-poller [--every-minutes N] [--exec CMD] [--cursor-file PATH] [--print]   Idempotent crontab entry
   uninstall-poller
+
+Messages from the owner
+  messages [--thread ID] [--wait SECONDS] [--interval SECONDS]   Exit 0 with open messages (JSON lines), 3 when there are none
+  working --id MESSAGE_ID                                        Show the owner you are on it
+  reply --to MESSAGE_ID --text TEXT [--id ID] [--progress]        Answer (or post progress on) one of the owner's messages
+  say --text TEXT [--thread ID] [--id ID]                          Post a new message to the owner
 
 Hand off
   handoff --goal TEXT [--key K] [--context TEXT] [--criteria TEXT] [--item ID]
@@ -220,7 +226,7 @@ export async function runAgentCli(argv: readonly string[], defaults: CliDefaults
           args: [...rest],
           options: {
             id: { type: "string" }, prompt: { type: "string" }, option: { type: "string", multiple: true }, approval: { type: "boolean" }, "no-free-text": { type: "boolean" },
-            details: { type: "string" }, item: { type: "string" }, action: { type: "string" }, digest: { type: "string" }, urgency: { type: "string" }, "expires-in": { type: "string" },
+            details: { type: "string" }, item: { type: "string" }, thread: { type: "string" }, action: { type: "string" }, digest: { type: "string" }, urgency: { type: "string" }, "expires-in": { type: "string" },
           },
           strict: true,
         });
@@ -231,7 +237,7 @@ export async function runAgentCli(argv: readonly string[], defaults: CliDefaults
         });
         out(await client().createQuestion({
           id: values.id, kind: values.approval ? "approval" : "question", prompt: values.prompt, details: values.details,
-          options: values.approval ? undefined : options, allow_free_text: values["no-free-text"] ? false : undefined, work_item_id: values.item,
+          options: values.approval ? undefined : options, allow_free_text: values["no-free-text"] ? false : undefined, work_item_id: values.item, thread_id: values.thread,
           affected_action: values.action, action_digest: values.digest, urgency: values.urgency,
           expires_in_seconds: values["expires-in"] ? Number(values["expires-in"]) : undefined,
         }));
@@ -332,6 +338,38 @@ export async function runAgentCli(argv: readonly string[], defaults: CliDefaults
           return EXIT.error;
         }
         out({ ok: true, installed: command === "install-poller", entry: command === "install-poller" ? line : null });
+        return EXIT.ok;
+      }
+      case "messages": {
+        const { values } = parseArgs({ args: [...rest], options: { thread: { type: "string" }, wait: { type: "string" }, interval: { type: "string" } }, strict: true });
+        const deadline = Date.now() + Math.max(0, Number(values.wait ?? 0)) * 1000;
+        const interval = Math.max(2, Number(values.interval ?? 5)) * 1000;
+        for (;;) {
+          const { messages } = await client().checkMessages({ thread_id: values.thread });
+          if (messages.length > 0) {
+            io.stdout(`${messages.map((message) => JSON.stringify(message)).join("\n")}\n`);
+            return EXIT.ok;
+          }
+          if (Date.now() + interval > deadline) return EXIT.nothingNew;
+          await sleep(interval);
+        }
+      }
+      case "working": {
+        const { values } = parseArgs({ args: [...rest], options: { id: { type: "string" } }, strict: true });
+        if (!values.id) throw new UsageError("working needs --id MESSAGE_ID");
+        out(await client().acknowledgeMessage(values.id));
+        return EXIT.ok;
+      }
+      case "reply":
+      case "say": {
+        const { values } = parseArgs({ args: [...rest], options: { to: { type: "string" }, text: { type: "string" }, id: { type: "string" }, progress: { type: "boolean" }, thread: { type: "string" } }, strict: true });
+        if (!values.text) throw new UsageError(`${command} needs --text`);
+        if (command === "reply" && !values.to) throw new UsageError("reply needs --to MESSAGE_ID");
+        out(await client().postMessage({
+          text: values.text,
+          id: values.id,
+          ...(command === "reply" ? { reply_to: values.to, kind: values.progress ? "progress" as const : "reply" as const } : { thread_id: values.thread }),
+        }));
         return EXIT.ok;
       }
       case "handoff": {

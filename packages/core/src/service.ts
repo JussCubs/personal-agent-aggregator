@@ -20,10 +20,14 @@ import {
   type Job,
   type JobStatus,
   type JsonObject,
+  type Message,
+  type MessageKind,
+  type MessageStatus,
   type Question,
   type QuestionOption,
   type QuestionStatus,
   type Scope,
+  type Thread,
   type WorkItem,
   type WorkItemKind,
 } from "./contract.js";
@@ -115,6 +119,12 @@ export interface ServiceHooks {
   jobCreated?(event: { ownerId: string; connection: ConnectionSummary; job: Job }): void | Promise<void>;
   jobChanged?(event: { ownerId: string; connection: ConnectionSummary; job: Job; previousStatus: JobStatus }): void | Promise<void>;
   connectionRevoked?(event: { ownerId: string; connection: ConnectionSummary }): void | Promise<void>;
+  /** An agent recorded a new checkpoint (not fired for idempotent retries). */
+  checkpointPosted?(event: { ownerId: string; connection: ConnectionSummary; checkpoint: Checkpoint }): void | Promise<void>;
+  /** An agent posted a message (a reply, progress, or a new message) into a thread. */
+  messagePosted?(event: { ownerId: string; connection: ConnectionSummary; thread: Thread; message: Message; repliedTo: Message | null }): void | Promise<void>;
+  /** An owner → agent message changed status (delivered, working, replied, failed). */
+  messageStatusChanged?(event: { ownerId: string; connection: ConnectionSummary; thread: Thread; message: Message }): void | Promise<void>;
   deliveriesQueued?(event: { ownerId: string; connectionId: string; count: number }): void | Promise<void>;
   hookError?(error: unknown, hook: string): void;
 }
@@ -138,6 +148,10 @@ export interface AggregatorServiceOptions {
   eventRetentionDays?: number;
   /** Checkpoints and audit entries older than this are pruned by sweep(). Default 180. */
   historyRetentionDays?: number;
+  /** Owner → agent messages: not picked up after this many minutes → failed (default 20). */
+  messagePickupMinutes?: number;
+  /** Owner → agent messages: delivered but unanswered after this many minutes → failed (default 120). */
+  messageReplyMinutes?: number;
   /** Custom delivery transport (tests); defaults to the SSRF-guarded HTTP client. */
   send?: (input: { url: string; headers: Record<string, string>; body: string }) => Promise<{ status: number; body: string }>;
 }
@@ -199,6 +213,8 @@ export class AggregatorService {
   private readonly oauthTtl: { access: number; refresh: number; code: number; request: number };
   private readonly retentionDays: number;
   private readonly historyDays: number;
+  private readonly pickupMinutes: number;
+  private readonly replyMinutes: number;
   private readonly sendImpl: AggregatorServiceOptions["send"];
 
   constructor(opts: AggregatorServiceOptions) {
@@ -218,6 +234,8 @@ export class AggregatorService {
     };
     this.retentionDays = opts.eventRetentionDays ?? 30;
     this.historyDays = opts.historyRetentionDays ?? 180;
+    this.pickupMinutes = opts.messagePickupMinutes ?? 20;
+    this.replyMinutes = opts.messageReplyMinutes ?? 120;
     this.sendImpl = opts.send;
   }
 
@@ -344,6 +362,7 @@ export class AggregatorService {
       options: asJson<QuestionOption[]>(row.options) ?? [],
       allow_free_text: asBool(row.allow_free_text),
       work_item_id: (row.work_item_id as string | null) ?? null,
+      thread_id: (row.thread_id as string | null) ?? null,
       affected_action: (row.affected_action as string | null) ?? null,
       action_digest: (row.action_digest as string | null) ?? null,
       urgency: String(row.urgency) as Question["urgency"],
@@ -375,14 +394,88 @@ export class AggregatorService {
     };
   }
 
+  private toThread(row: Row): Thread {
+    return { id: String(row.id), ref: String(row.ref), title: (row.title as string | null) ?? null, created_at: asIso(row.created_at)!, updated_at: asIso(row.updated_at)! };
+  }
+
+  private toMessage(row: Row): Message {
+    let text = "";
+    try {
+      text = this.box.decrypt(String(row.body_enc));
+    } catch {
+      text = "";
+    }
+    return {
+      id: String(row.id),
+      thread_id: String(row.thread_id),
+      thread_ref: String(row.thread_ref ?? ""),
+      direction: String(row.direction) as Message["direction"],
+      kind: String(row.kind) as MessageKind,
+      text,
+      reply_to: (row.reply_to as string | null) ?? null,
+      status: String(row.status) as MessageStatus,
+      status_reason: (row.status_reason as string | null) ?? null,
+      created_at: asIso(row.created_at)!,
+      delivered_at: asIso(row.delivered_at),
+      working_at: asIso(row.working_at),
+      replied_at: asIso(row.replied_at),
+    };
+  }
+
+  private messageSelect(): string {
+    return `SELECT m.*, t.ref AS thread_ref FROM ${this.t("messages")} m JOIN ${this.t("threads")} t ON t.id = m.thread_id AND t.connection_id = m.connection_id`;
+  }
+
+  /** Moves owner → agent messages forward (never backward) and queues the status hook. */
+  private async advanceMessages(db: Db, after: After, ownerId: string, connectionId: string, ids: readonly string[], status: "delivered" | "working" | "replied" | "failed", reason: string | null): Promise<void> {
+    if (ids.length === 0) return;
+    const now = this.now().toISOString();
+    const from = status === "delivered" ? ["queued"] : status === "working" ? ["queued", "delivered"] : status === "replied" ? ["queued", "delivered", "working"] : ["queued", "delivered", "working"];
+    const column = status === "delivered" ? "delivered_at" : status === "working" ? "working_at" : status === "replied" ? "replied_at" : null;
+    for (const id of ids) {
+      const rows = await db.query(
+        `UPDATE ${this.t("messages")} SET status = $4, status_reason = $5, updated_at = $6${column ? `, ${column} = coalesce(${column}, $6)` : ""}${status !== "delivered" && status !== "failed" ? ", delivered_at = coalesce(delivered_at, $6)" : ""}
+         WHERE id = $1 AND connection_id = $2 AND owner_id = $3 AND direction = 'to_agent' AND status IN (${from.map((f) => `'${f}'`).join(",")}) RETURNING id`,
+        [id, connectionId, ownerId, status, reason, now],
+      );
+      if (!rows[0] || !this.hooks.messageStatusChanged) continue;
+      const hook = this.hooks.messageStatusChanged;
+      const [full] = await db.query(`${this.messageSelect()} WHERE m.id = $1 AND m.connection_id = $2`, [id, connectionId]);
+      const [connection] = await db.query(`SELECT id, provider, display_name, mode FROM ${this.t("connections")} WHERE id = $1 AND owner_id = $2`, [connectionId, ownerId]);
+      if (!full || !connection) continue;
+      const message = this.toMessage(full);
+      const [threadRow] = await db.query(`SELECT * FROM ${this.t("threads")} WHERE id = $1 AND connection_id = $2`, [message.thread_id, connectionId]);
+      if (!threadRow) continue;
+      const thread = this.toThread(threadRow);
+      const summary = { id: String(connection.id), provider: String(connection.provider), display_name: String(connection.display_name), mode: String(connection.mode) as ConnectionMode };
+      after.push(() => hook({ ownerId, connection: summary, thread, message }));
+    }
+  }
+
   private toEvent(row: Row): HubEvent {
     return {
       eventId: String(row.id),
       name: String(row.name) as EventName,
       timestamp: asIso(row.created_at)!,
-      data: asJson<JsonObject>(row.data) ?? {},
+      data: this.eventData(row.data),
       cursor: encodeCursor(asNumber(row.seq)),
     };
+  }
+
+  /** Stored event data → wire data: an encrypted `text_enc` (message.created) becomes `text` in place. */
+  private eventData(value: unknown): JsonObject {
+    const data = asJson<JsonObject>(value) ?? {};
+    if (typeof data.text_enc !== "string") return data;
+    return Object.fromEntries(
+      Object.entries(data).map(([key, item]) => {
+        if (key !== "text_enc") return [key, item];
+        try {
+          return ["text", this.box.decrypt(String(item))];
+        } catch {
+          return ["text", ""];
+        }
+      }),
+    ) as JsonObject;
   }
 
   private async connectionRow(db: Db, ownerId: string, connectionId: string, lock = false): Promise<Connection> {
@@ -576,7 +669,7 @@ export class AggregatorService {
     const summary = requiredText(raw.summary, "summary", LIMITS.summaryLength);
     const status = cleanText(raw.status, "status", LIMITS.statusLength, { multiline: false });
     const data = cleanData(raw.data);
-    return await this.scoped(this.agentScope(p), async (db) => {
+    return await this.scoped(this.agentScope(p), async (db, after) => {
       const existing = await db.query(`SELECT * FROM ${this.t("checkpoints")} WHERE connection_id = $1 AND id = $2`, [p.connectionId, id]);
       if (existing[0]) return { checkpoint: this.toCheckpoint(existing[0]), created: false };
       const count = await db.query(`SELECT count(*) AS n FROM ${this.t("checkpoints")} WHERE connection_id = $1`, [p.connectionId]);
@@ -590,7 +683,13 @@ export class AggregatorService {
         [p.ownerId, p.connectionId, id, workItemId, summary, status, data ? JSON.stringify(data) : null, now],
       );
       await this.audit(db, { ownerId: p.ownerId, connectionId: p.connectionId, actor: "agent", action: "checkpoint.create", targetType: "checkpoint", targetId: id, detail: { work_item_id: workItemId } });
-      return { checkpoint: this.toCheckpoint(rows[0]!), created: true };
+      const checkpoint = this.toCheckpoint(rows[0]!);
+      const hook = this.hooks.checkpointPosted;
+      if (hook) {
+        const connection = await this.connectionRow(db, p.ownerId, p.connectionId);
+        after.push(() => hook({ ownerId: p.ownerId, connection: this.summary(connection), checkpoint }));
+      }
+      return { checkpoint, created: true };
     });
   }
 
@@ -673,6 +772,8 @@ export class AggregatorService {
     const allowFreeText = cleanBoolean(raw.allow_free_text, "allow_free_text", kind === "question");
     if (kind === "question" && options.length === 0 && !allowFreeText) throw invalid("a question needs options or allow_free_text", "options");
     const workItemId = cleanId(raw.work_item_id ?? raw.task_id, "work_item_id");
+    const threadId = raw.thread_id === undefined || raw.thread_id === null || raw.thread_id === "" ? null : String(raw.thread_id);
+    if (threadId && !isUuid(threadId)) throw invalid("thread_id must be a thread id", "thread_id");
     const affectedAction = cleanText(raw.affected_action, "affected_action", LIMITS.affectedActionLength);
     const actionDigest = raw.action_digest === undefined || raw.action_digest === null ? null : String(raw.action_digest);
     if (actionDigest !== null && !/^[A-Za-z0-9:_=+/.-]{1,128}$/.test(actionDigest)) throw invalid("action_digest must be 1-128 URL-safe characters", "action_digest");
@@ -688,6 +789,10 @@ export class AggregatorService {
     const content = { kind, prompt, details, options, allow_free_text: allowFreeText, work_item_id: workItemId, affected_action: affectedAction, action_digest: actionDigest, urgency, expires_at: expiresAt };
     return await this.scoped(this.agentScope(p), async (db, after) => {
       const connection = await this.connectionRow(db, p.ownerId, p.connectionId);
+      if (threadId) {
+        const [thread] = await db.query(`SELECT id FROM ${this.t("threads")} WHERE id = $1 AND connection_id = $2`, [threadId, p.connectionId]);
+        if (!thread) throw new AggregatorError("not_found", "thread not found");
+      }
       const existingRows = await db.query(`SELECT * FROM ${this.t("questions")} WHERE connection_id = $1 AND id = $2 FOR UPDATE`, [p.connectionId, id]);
       const now = this.now().toISOString();
       if (existingRows[0]) {
@@ -720,9 +825,9 @@ export class AggregatorService {
       }
       const rows = await db.query(
         `INSERT INTO ${this.t("questions")} (key, owner_id, connection_id, id, kind, prompt, details, options, allow_free_text, work_item_id, affected_action, action_digest,
-           urgency, status, revision, expires_at, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13, 'pending', 1, $14, $15, $15) RETURNING *`,
-        [newUuid(), p.ownerId, p.connectionId, id, kind, prompt, details, JSON.stringify(options), allowFreeText, workItemId, affectedAction, actionDigest, urgency, expiresAt, now],
+           urgency, status, revision, expires_at, created_at, updated_at, thread_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13, 'pending', 1, $14, $15, $15, $16) RETURNING *`,
+        [newUuid(), p.ownerId, p.connectionId, id, kind, prompt, details, JSON.stringify(options), allowFreeText, workItemId, affectedAction, actionDigest, urgency, expiresAt, now, threadId],
       );
       const question = this.toQuestion(rows[0]!);
       await this.audit(db, { ownerId: p.ownerId, connectionId: p.connectionId, actor: "agent", action: "question.create", targetType: "question", targetId: id, detail: { kind, options: options.length, urgency } });
@@ -812,13 +917,16 @@ export class AggregatorService {
     const limit = cleanInteger(query.limit, "limit", { min: 1, max: LIMITS.pageSize, fallback: 50 });
     const names = typeof query.names === "string" && query.names ? query.names.split(",").map((name) => name.trim()) : null;
     if (names && names.some((name) => !EVENT_NAMES.includes(name as EventName))) throw invalid(`names must be a comma-separated subset of ${EVENT_NAMES.join(", ")}`, "names");
-    return await this.scoped(this.agentScope(p), async (db) => {
+    return await this.scoped(this.agentScope(p), async (db, afterCommit) => {
       const rows = await db.query(
         `SELECT seq, id, name, data, created_at FROM ${this.t("events")} WHERE connection_id = $1 AND seq > $2 ORDER BY seq LIMIT $3`,
         [p.connectionId, after, limit + 1],
       );
       const page = rows.slice(0, limit);
       const events = page.map((row) => this.toEvent(row)).filter((event) => !names || names.includes(event.name));
+      // Reading the inbox is the delivery receipt for messages in it.
+      const delivered = events.filter((event) => event.name === "message.created").map((event) => String(event.data.message_id ?? "")).filter(Boolean);
+      await this.advanceMessages(db, afterCommit, p.ownerId, p.connectionId, delivered, "delivered", null);
       const lastSeq = page.length ? asNumber(page[page.length - 1]!.seq) : after;
       return { events, cursor: encodeCursor(lastSeq), has_more: rows.length > limit };
     });
@@ -978,7 +1086,7 @@ export class AggregatorService {
   private parseSubscriptionArgs(name: EventName, value: unknown): JsonObject {
     if (value === undefined || value === null) return {};
     const raw = asObject(value, "arguments");
-    const allowed = name === "job.updated" ? ["job_id"] : ["question_id"];
+    const allowed = name === "job.updated" ? ["job_id"] : name === "message.created" ? ["thread_id"] : ["question_id"];
     const out: JsonObject = {};
     for (const [key, item] of Object.entries(raw)) {
       if (!allowed.includes(key)) throw invalid(`arguments.${key} is not supported for ${name}`, `arguments.${key}`);
@@ -1108,6 +1216,174 @@ export class AggregatorService {
       if (rows[0]) await this.audit(db, { ownerId: p.ownerId, connectionId: p.connectionId, actor: "agent", action: "subscription.delete", targetType: "destination", targetId: subscriptionId });
     });
     return {};
+  }
+
+  // ------------------------------------------------ conversation bridge
+
+  private async ensureThread(db: Db, ownerId: string, connectionId: string, ref: string, title: string | null): Promise<Thread> {
+    const now = this.now().toISOString();
+    const existing = await db.query(`SELECT * FROM ${this.t("threads")} WHERE connection_id = $1 AND ref = $2`, [connectionId, ref]);
+    if (existing[0]) return this.toThread(existing[0]);
+    const rows = await db.query(
+      `INSERT INTO ${this.t("threads")} (id, owner_id, connection_id, ref, title, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $6) RETURNING *`,
+      [newUuid(), ownerId, connectionId, ref, title, now],
+    );
+    return this.toThread(rows[0]!);
+  }
+
+  /** Next position in a thread, allocated under the thread row lock so order is total. */
+  private async nextMessageSeq(db: Db, threadId: string, now: string): Promise<number> {
+    const rows = await db.query(`UPDATE ${this.t("threads")} SET message_seq = message_seq + 1, updated_at = $2 WHERE id = $1 RETURNING message_seq`, [threadId, now]);
+    return asNumber(rows[0]?.message_seq);
+  }
+
+  /** The owner addresses a message to an agent. It is stored encrypted and announced to the agent as message.created. */
+  async sendMessage(o: OwnerPrincipal, rawInput: unknown): Promise<{ message: Message; thread: Thread; created: boolean }> {
+    const raw = asObject(rawInput);
+    const connectionId = typeof raw.connection_id === "string" ? raw.connection_id : "";
+    const ref = cleanText(raw.thread_ref, "thread_ref", LIMITS.threadRefLength, { multiline: false }) ?? "default";
+    const title = cleanText(raw.thread_title, "thread_title", LIMITS.titleLength, { multiline: false });
+    const text = requiredText(raw.text, "text", LIMITS.messageLength);
+    const clientId = cleanId(raw.idempotency_key, "idempotency_key");
+    return await this.scoped(this.ownerScope(o), async (db, after) => {
+      const connection = await this.connectionRow(db, o.ownerId, connectionId);
+      if (connection.status !== "active") throw new AggregatorError("conflict", "this agent is not connected");
+      if (!connection.scopes.includes(SCOPES.chat)) throw new AggregatorError("conflict", "this agent's connection does not allow messages");
+      if (clientId) {
+        const existing = await db.query(`${this.messageSelect()} WHERE m.connection_id = $1 AND m.direction = 'to_agent' AND m.client_id = $2`, [connectionId, clientId]);
+        if (existing[0]) {
+          const message = this.toMessage(existing[0]);
+          const [threadRow] = await db.query(`SELECT * FROM ${this.t("threads")} WHERE id = $1`, [message.thread_id]);
+          return { message, thread: this.toThread(threadRow!), created: false };
+        }
+      }
+      const thread = await this.ensureThread(db, o.ownerId, connectionId, ref, title);
+      const now = this.now().toISOString();
+      const id = newUuid();
+      const seq = await this.nextMessageSeq(db, thread.id, now);
+      await db.query(
+        `INSERT INTO ${this.t("messages")} (id, owner_id, connection_id, thread_id, seq, direction, kind, body_enc, client_id, reply_to, status, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $8, 'to_agent', 'message', $5, $6, NULL, 'queued', $7, $7)`,
+        [id, o.ownerId, connectionId, thread.id, this.box.encrypt(text), clientId, now, seq],
+      );
+      // The stored event keeps the text encrypted like the message body; inbox reads and deliveries decrypt it (eventData).
+      await this.appendEvent(db, after, o.ownerId, connectionId, "message.created", {
+        message_id: id,
+        thread_id: thread.id,
+        thread_ref: thread.ref,
+        text_enc: this.box.encrypt(text),
+        created_at: now,
+      });
+      await this.audit(db, { ownerId: o.ownerId, connectionId, actor: "owner", action: "message.send", targetType: "message", targetId: id, detail: this.ownerAudit(o, { length: text.length }) });
+      const [row] = await db.query(`${this.messageSelect()} WHERE m.id = $1`, [id]);
+      return { message: this.toMessage(row!), thread, created: true };
+    });
+  }
+
+  async listThreadMessages(o: OwnerPrincipal, query: { connection_id?: unknown; thread_ref?: unknown; limit?: unknown }): Promise<Message[]> {
+    const connectionId = optionalConnectionId(query.connection_id);
+    if (!connectionId) throw invalid("connection_id is required", "connection_id");
+    const ref = cleanText(query.thread_ref, "thread_ref", LIMITS.threadRefLength, { multiline: false }) ?? "default";
+    const limit = cleanInteger(query.limit, "limit", { min: 1, max: LIMITS.pageSize, fallback: 50 });
+    return await this.scoped(this.ownerScope(o), async (db) => {
+      const rows = await db.query(`${this.messageSelect()} WHERE m.connection_id = $1 AND m.owner_id = $2 AND t.ref = $3 ORDER BY m.seq DESC LIMIT $4`, [connectionId, o.ownerId, ref, limit]);
+      return rows.map((row) => this.toMessage(row)).reverse();
+    });
+  }
+
+  /** Messages the owner addressed to this agent that it has not replied to yet (oldest first). Read-only for the agent. */
+  async checkMessages(p: AgentPrincipal, query: { thread_id?: unknown; include_replied?: unknown; limit?: unknown } = {}): Promise<{ messages: Message[] }> {
+    this.requireScope(p, SCOPES.chat);
+    const threadId = query.thread_id === undefined || query.thread_id === null || query.thread_id === "" ? null : String(query.thread_id);
+    if (threadId && !isUuid(threadId)) throw invalid("thread_id must be a thread id", "thread_id");
+    const includeReplied = query.include_replied === true || query.include_replied === "true";
+    const limit = cleanInteger(query.limit, "limit", { min: 1, max: LIMITS.pageSize, fallback: 20 });
+    return await this.scoped(this.agentScope(p), async (db, after) => {
+      const rows = await db.query(
+        `${this.messageSelect()} WHERE m.connection_id = $1 AND m.direction = 'to_agent' AND ($2::uuid IS NULL OR m.thread_id = $2::uuid)
+           AND ($3::boolean = true OR m.status IN ('queued','delivered','working')) ORDER BY m.created_at, m.seq LIMIT $4`,
+        [p.connectionId, threadId, includeReplied, limit],
+      );
+      const messages = rows.map((row) => this.toMessage(row));
+      await this.advanceMessages(db, after, p.ownerId, p.connectionId, messages.filter((m) => m.status === "queued").map((m) => m.id), "delivered", null);
+      return { messages: messages.map((m) => (m.status === "queued" ? { ...m, status: "delivered" as const } : m)) };
+    });
+  }
+
+  /** The agent says it is working on a message (shown to the owner as "working"). */
+  async acknowledgeMessage(p: AgentPrincipal, rawInput: unknown): Promise<{ message: Message }> {
+    this.requireScope(p, SCOPES.chat);
+    const raw = asObject(rawInput);
+    const id = typeof raw.message_id === "string" && isUuid(raw.message_id) ? raw.message_id : null;
+    if (!id) throw invalid("message_id must be a message id", "message_id");
+    return await this.scoped(this.agentScope(p), async (db, after) => {
+      const [row] = await db.query(`${this.messageSelect()} WHERE m.id = $1 AND m.connection_id = $2 AND m.direction = 'to_agent'`, [id, p.connectionId]);
+      if (!row) throw new AggregatorError("not_found", "message not found");
+      await this.advanceMessages(db, after, p.ownerId, p.connectionId, [id], "working", null);
+      const [next] = await db.query(`${this.messageSelect()} WHERE m.id = $1`, [id]);
+      return { message: this.toMessage(next!) };
+    });
+  }
+
+  /**
+   * The agent posts into a thread: a reply to one of the owner's messages
+   * (reply_to), progress on it (kind progress), or a new message (thread_id,
+   * else its most recent thread). Idempotent by id.
+   */
+  async postMessage(p: AgentPrincipal, rawInput: unknown): Promise<{ message: Message; thread: Thread; created: boolean }> {
+    this.requireScope(p, SCOPES.chat);
+    const raw = asObject(rawInput);
+    const text = requiredText(raw.text, "text", LIMITS.messageLength);
+    const clientId = cleanId(raw.id, "id");
+    const kind: MessageKind = raw.kind === "progress" ? "progress" : raw.reply_to ? "reply" : "message";
+    const replyTo = raw.reply_to === undefined || raw.reply_to === null || raw.reply_to === "" ? null : String(raw.reply_to);
+    if (replyTo && !isUuid(replyTo)) throw invalid("reply_to must be a message id", "reply_to");
+    const threadIdInput = raw.thread_id === undefined || raw.thread_id === null || raw.thread_id === "" ? null : String(raw.thread_id);
+    if (threadIdInput && !isUuid(threadIdInput)) throw invalid("thread_id must be a thread id", "thread_id");
+    return await this.scoped(this.agentScope(p), async (db, after) => {
+      const connection = await this.connectionRow(db, p.ownerId, p.connectionId);
+      if (clientId) {
+        const existing = await db.query(`${this.messageSelect()} WHERE m.connection_id = $1 AND m.direction = 'from_agent' AND m.client_id = $2`, [p.connectionId, clientId]);
+        if (existing[0]) {
+          const message = this.toMessage(existing[0]);
+          const [threadRow] = await db.query(`SELECT * FROM ${this.t("threads")} WHERE id = $1`, [message.thread_id]);
+          return { message, thread: this.toThread(threadRow!), created: false };
+        }
+      }
+      let repliedTo: Message | null = null;
+      let thread: Thread | null = null;
+      if (replyTo) {
+        const [row] = await db.query(`${this.messageSelect()} WHERE m.id = $1 AND m.connection_id = $2 AND m.direction = 'to_agent'`, [replyTo, p.connectionId]);
+        if (!row) throw new AggregatorError("not_found", "reply_to message not found");
+        repliedTo = this.toMessage(row);
+        const [threadRow] = await db.query(`SELECT * FROM ${this.t("threads")} WHERE id = $1`, [repliedTo.thread_id]);
+        thread = this.toThread(threadRow!);
+      } else if (threadIdInput) {
+        const [threadRow] = await db.query(`SELECT * FROM ${this.t("threads")} WHERE id = $1 AND connection_id = $2`, [threadIdInput, p.connectionId]);
+        if (!threadRow) throw new AggregatorError("not_found", "thread not found");
+        thread = this.toThread(threadRow);
+      } else {
+        const [latest] = await db.query(`SELECT * FROM ${this.t("threads")} WHERE connection_id = $1 ORDER BY updated_at DESC LIMIT 1`, [p.connectionId]);
+        thread = latest ? this.toThread(latest) : await this.ensureThread(db, p.ownerId, p.connectionId, "default", null);
+      }
+      const now = this.now().toISOString();
+      const id = newUuid();
+      const seq = await this.nextMessageSeq(db, thread.id, now);
+      await db.query(
+        `INSERT INTO ${this.t("messages")} (id, owner_id, connection_id, thread_id, seq, direction, kind, body_enc, client_id, reply_to, status, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $10, 'from_agent', $5, $6, $7, $8, 'posted', $9, $9)`,
+        [id, p.ownerId, p.connectionId, thread.id, kind, this.box.encrypt(text), clientId, replyTo, now, seq],
+      );
+      if (repliedTo) await this.advanceMessages(db, after, p.ownerId, p.connectionId, [repliedTo.id], kind === "progress" ? "working" : "replied", null);
+      await this.audit(db, { ownerId: p.ownerId, connectionId: p.connectionId, actor: "agent", action: "message.post", targetType: "message", targetId: id, detail: { kind, length: text.length } });
+      const [row] = await db.query(`${this.messageSelect()} WHERE m.id = $1`, [id]);
+      const message = this.toMessage(row!);
+      const hook = this.hooks.messagePosted;
+      const summary = this.summary(connection);
+      const posted = thread;
+      if (hook) after.push(() => hook({ ownerId: p.ownerId, connection: summary, thread: posted, message, repliedTo }));
+      return { message, thread, created: true };
+    });
   }
 
   // ------------------------------------------------------- owner: setup
@@ -1273,6 +1549,8 @@ export class AggregatorService {
        WHERE connection_id = $1 AND owner_id = $2 AND status IN ('needs_user','running','blocked') RETURNING *`,
       [connectionId, ownerId, now],
     );
+    const openMessages = await db.query(`SELECT id FROM ${this.t("messages")} WHERE connection_id = $1 AND owner_id = $2 AND direction = 'to_agent' AND status IN ('queued','delivered','working')`, [connectionId, ownerId]);
+    await this.advanceMessages(db, after, ownerId, connectionId, openMessages.map((m) => String(m.id)), "failed", "connection_revoked");
     const rows = await db.query(
       `UPDATE ${this.t("connections")} SET status = 'revoked', revoked_at = coalesce(revoked_at, $3), updated_at = $3 WHERE id = $1 AND owner_id = $2
        RETURNING id, provider, display_name, mode, status, scopes, settings, created_at, updated_at, last_seen_at, revoked_at`,
@@ -1295,7 +1573,7 @@ export class AggregatorService {
     return await this.scoped(this.ownerScope(o), async (db, after) => {
       await this.revokeInTx(db, after, o.ownerId, connectionId, o);
       const counts: Record<string, number> = {};
-      for (const table of ["work_items", "checkpoints", "questions", "jobs", "events", "deliveries", "credentials"]) {
+      for (const table of ["work_items", "checkpoints", "questions", "jobs", "events", "deliveries", "credentials", "threads", "messages"]) {
         const rows = await db.query(`SELECT count(*) AS n FROM ${this.t(table)} WHERE connection_id = $1 AND owner_id = $2`, [connectionId, o.ownerId]);
         counts[table] = asNumber(rows[0]?.n);
       }
@@ -1876,14 +2154,17 @@ export class AggregatorService {
     let delivered = 0;
     let failed = 0;
     let retried = 0;
+    const receipts: After = [];
     for (const row of leased) {
       const outcome = await this.attemptDelivery(row);
       await this.privileged(async (db) => {
         const now = this.now();
         const attempts = asNumber(row.attempts) + 1;
+        const messageId = row.name === "message.created" ? String((asJson<JsonObject>(row.data) ?? {}).message_id ?? "") : "";
         if (outcome.kind === "delivered") {
           delivered += 1;
           await db.query(`UPDATE ${this.t("deliveries")} SET status = 'delivered', attempts = $2, last_status = $3, last_error = NULL, delivered_at = $4 WHERE id = $1`, [row.id, attempts, outcome.status, now.toISOString()]);
+          if (messageId) await this.advanceMessages(db, receipts, String(row.owner_id), String(row.connection_id), [messageId], "delivered", null);
         } else if (outcome.kind === "gone") {
           failed += 1;
           await db.query(`UPDATE ${this.t("deliveries")} SET status = 'failed', attempts = $2, last_status = 410, last_error = 'gone' WHERE id = $1`, [row.id, attempts]);
@@ -1891,6 +2172,7 @@ export class AggregatorService {
         } else if (outcome.kind === "final" || attempts > RETRY_DELAYS_SECONDS.length) {
           failed += 1;
           await db.query(`UPDATE ${this.t("deliveries")} SET status = 'failed', attempts = $2, last_status = $3, last_error = $4 WHERE id = $1`, [row.id, attempts, outcome.status ?? null, outcome.error]);
+          // The agent can still read it from its inbox; the pickup timeout decides if it is lost.
         } else {
           retried += 1;
           await db.query(
@@ -1900,6 +2182,7 @@ export class AggregatorService {
         }
       });
     }
+    await this.runHooks(receipts);
     return { delivered, failed, retried };
   }
 
@@ -1910,7 +2193,7 @@ export class AggregatorService {
       eventId: String(row.event_id),
       name: String(row.name) as EventName,
       timestamp: asIso(row.event_created_at)!,
-      data: asJson<JsonObject>(row.data) ?? {},
+      data: this.eventData(row.data),
       cursor: encodeCursor(asNumber(row.event_seq)),
     };
     let body = JSON.stringify(envelope);
@@ -1974,6 +2257,20 @@ export class AggregatorService {
       }
       return rows.length;
     });
+    const timedOut = await this.privileged(async (db, after) => {
+      const pickup = new Date(now.getTime() - this.pickupMinutes * 60_000).toISOString();
+      const reply = new Date(now.getTime() - this.replyMinutes * 60_000).toISOString();
+      const stale = await db.query(
+        `SELECT id, owner_id, connection_id, status FROM ${this.t("messages")} WHERE direction = 'to_agent'
+           AND ((status = 'queued' AND created_at < $1) OR (status IN ('delivered','working') AND created_at < $2)) LIMIT 200`,
+        [pickup, reply],
+      );
+      for (const row of stale) {
+        await this.advanceMessages(db, after, String(row.owner_id), String(row.connection_id), [String(row.id)], "failed", row.status === "queued" ? "not_picked_up" : "no_reply");
+      }
+      return stale.length;
+    });
+    void timedOut;
     const prunedEvents = await this.privileged(async (db) => {
       const cutoff = new Date(now.getTime() - this.retentionDays * 86_400_000).toISOString();
       await db.query(`DELETE FROM ${this.t("deliveries")} WHERE status <> 'pending' AND created_at < $1`, [cutoff]);

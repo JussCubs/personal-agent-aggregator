@@ -108,7 +108,7 @@ export async function run(check) {
       const who = await tool(url, tokens.access_token, "whoami", {}, { modern: true });
       expectEqual(who.mode, "oauth_events", "mode");
       const events = await mcp(url, tokens.access_token, "events/list", {}, { modern: true });
-      expectEqual(events.json.result.events.map((e) => e.name).join(","), "answer.created,question.updated,job.updated", "event catalog");
+      expectEqual(events.json.result.events.map((e) => e.name).join(","), "answer.created,question.updated,job.updated,message.created", "event catalog");
     });
 
     receiver = await startReceiver();

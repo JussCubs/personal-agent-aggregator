@@ -93,7 +93,7 @@ test("MCP endpoint: challenges, origins, both protocol eras", async (t) => {
   const { token } = await agentConnection(ctx);
   const anonymous = await request(ctx.url, "POST", "/mcp", { body: { jsonrpc: "2.0", id: 1, method: "initialize", params: {} } });
   assert.equal(anonymous.status, 401);
-  assert.equal(anonymous.headers.get("www-authenticate"), `Bearer resource_metadata="${ctx.url}/.well-known/oauth-protected-resource/mcp", scope="hub:read hub:write hub:ask hub:handoff"`);
+  assert.equal(anonymous.headers.get("www-authenticate"), `Bearer resource_metadata="${ctx.url}/.well-known/oauth-protected-resource/mcp", scope="hub:read hub:write hub:ask hub:handoff hub:chat"`);
   const wrong = await request(ctx.url, "POST", "/mcp", { token: `agg_${"y".repeat(43)}`, body: { jsonrpc: "2.0", id: 1, method: "ping" } });
   assert.match(wrong.headers.get("www-authenticate"), /error="invalid_token"/);
   const init = await mcp(ctx.url, token, "initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "1" } });

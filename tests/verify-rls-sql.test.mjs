@@ -37,6 +37,8 @@ test("scripts/verify-rls.sql passes on a migrated database with data", { skip: !
       await server.service.createQuestion(agent, { id: "q1", prompt: "Proceed?", options: ["yes"] });
       await server.service.handoffJob(agent, { goal: "Do the thing" });
       await server.service.setWebhook(agent, { url: "http://127.0.0.1:9/hook", auth_header_value: "k" });
+      const sent = await server.service.sendMessage(principal, { connection_id: connection.id, thread_ref: "room-1", text: `${name} message` });
+      await server.service.postMessage(agent, { reply_to: sent.message.id, text: `${name} reply` });
     }
   } finally {
     await server.close();

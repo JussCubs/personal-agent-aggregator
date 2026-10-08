@@ -143,6 +143,25 @@ test("RLS isolates owners and connections in Postgres", { skip: !url }, async (t
         /foreign key/,
         "a delivery cannot target a sibling connection's webhook",
       );
+      // Conversation bridge: an agent cannot read a sibling's thread, forge the owner's side, or edit the owner's text.
+      const toA1 = await service.sendMessage(ownerA, { connection_id: a1.c.id, thread_ref: "room-a", text: "private note for A1" });
+      await assert.rejects(check(() => service.checkMessages(a2.p, { thread_id: toA1.thread.id }).then((r) => { if (r.messages.length) throw new Error("leak"); throw new Error("not found"); })), /not found/);
+      await assert.rejects(
+        check(() => driver.scoped({ role: "agent", ownerId: ownerA.ownerId, connectionId: a1.c.id }, (db) =>
+          db.query(`INSERT INTO ${t_("messages")} (id, owner_id, connection_id, thread_id, direction, kind, body_enc, status, created_at, updated_at) VALUES ($1, $2, $3, $4, 'to_agent', 'message', 'x', 'queued', now(), now())`, [randomUUID(), ownerA.ownerId, a1.c.id, toA1.thread.id]))),
+        /may only post their own messages/,
+      );
+      await assert.rejects(
+        check(() => driver.scoped({ role: "agent", ownerId: ownerA.ownerId, connectionId: a1.c.id }, (db) => db.query(`UPDATE ${t_("messages")} SET body_enc = 'tampered' WHERE id = $1`, [toA1.message.id]))),
+        /permission denied/,
+      );
+      const siblingView = await check(() => driver.scoped({ role: "agent", ownerId: ownerA.ownerId, connectionId: a2.c.id }, (db) => db.query(`SELECT count(*) AS n FROM ${t_("messages")}`)));
+      assert.equal(Number(siblingView[0].n), 0, "a sibling connection sees none of A1's messages");
+      const siblingThreads = await check(() => driver.scoped({ role: "agent", ownerId: ownerA.ownerId, connectionId: a2.c.id }, (db) => db.query(`SELECT count(*) AS n FROM ${t_("threads")}`)));
+      assert.equal(Number(siblingThreads[0].n), 0, "a sibling connection sees none of A1's threads");
+      const atRest = await check(() => admin.unsafe(`SELECT (SELECT string_agg(data::text, '') FROM ${t_("events")} WHERE connection_id = $1) AS events, (SELECT string_agg(body_enc, '') FROM ${t_("messages")} WHERE connection_id = $1) AS bodies`, [a1.c.id]));
+      assert.ok(!String(atRest[0].events).includes("private note") && !String(atRest[0].bodies).includes("private note"), "message text is encrypted in messages and in the inbox");
+      assert.equal((await service.readInbox(a1.p, {})).events.find((e) => e.name === "message.created").data.text, "private note for A1");
       const noContext = await check(() => sql.begin(async (tx) => {
         await tx.unsafe(`SET LOCAL ROLE ${prefix}agent`);
         return tx.unsafe(`SELECT count(*) AS n FROM ${t_("work_items")}`);
@@ -167,7 +186,8 @@ test("RLS isolates owners and connections in Postgres", { skip: !url }, async (t
       assert.ok(await check(() => service.authenticate(a2.token)), "a sibling connection keeps working");
       const removed = await check(() => service.deleteConnection(ownerA, a1.c.id));
       assert.ok(removed.deleted.work_items >= 1);
-      for (const table of ["work_items", "checkpoints", "questions", "jobs", "events", "destinations", "deliveries", "credentials"]) {
+      assert.ok(removed.deleted.messages >= 1 && removed.deleted.threads >= 1, "delete counts the conversation rows");
+      for (const table of ["work_items", "checkpoints", "questions", "jobs", "events", "destinations", "deliveries", "credentials", "threads", "messages"]) {
         const rows = await admin.unsafe(`SELECT count(*) AS n FROM ${t_(table)} WHERE connection_id = $1`, [a1.c.id]);
         assert.equal(Number(rows[0].n), 0, `${table} cleared`);
       }
@@ -179,6 +199,42 @@ test("RLS isolates owners and connections in Postgres", { skip: !url }, async (t
     await sql.end({ timeout: 5 });
     await admin.unsafe(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
     for (const role of [`${prefix}agent`, `${prefix}owner`, appRole]) {
+      await admin.unsafe(`DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${role}') THEN EXECUTE 'DROP OWNED BY ${role}'; EXECUTE 'DROP ROLE ${role}'; END IF; END $$`).catch(() => {});
+    }
+    await admin.end({ timeout: 5 });
+  }
+});
+
+test("migrating a 0.1.0 Postgres schema adds the columns and tables introduced since", { skip: !url }, async () => {
+  const tag = randomBytes(4).toString("hex");
+  const schema = `agg_upg_${tag}`;
+  const prefix = `u${tag}_`;
+  const admin = postgres(url, { max: 1, onnotice: () => {} });
+  await admin.unsafe(`CREATE SCHEMA ${schema}`);
+  const sql = postgres(url, { max: 2, onnotice: () => {}, connection: { search_path: schema } });
+  const driver = createPostgresDriver(sql, { prefix, schema });
+  const t_ = (name) => `${schema}.${prefix}${name}`;
+  try {
+    await driver.migrate();
+    // Back to the 0.1.0 shape: no conversation tables, no questions.thread_id, and an older version marker.
+    await admin.unsafe(`DROP TABLE ${t_("messages")}, ${t_("threads")}`);
+    await admin.unsafe(`ALTER TABLE ${t_("questions")} DROP COLUMN thread_id`);
+    await admin.unsafe(`COMMENT ON TABLE ${t_("connections")} IS 'agent-aggregator-schema:0000000000000000'`);
+    await driver.migrate();
+    const columns = await admin.unsafe(`SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2 AND column_name = 'thread_id'`, [schema, `${prefix}questions`]);
+    assert.equal(columns.length, 1, "questions.thread_id was added");
+    const service = new AggregatorService({ driver, prefix, secretBox: createAesGcmSecretBox(randomBytes(32).toString("hex")) });
+    const owner = { kind: "owner", ownerId: randomUUID(), name: "U", surface: "test" };
+    await sql.unsafe(`INSERT INTO ${t_("owners")} (id, name) VALUES ($1, $2)`, [owner.ownerId, owner.name]);
+    const connection = await service.createConnection(owner, { provider: "test_agent", display_name: "Upgraded", mode: "cli_poll" });
+    const agent = await service.authenticate((await service.issueAgentCredential(owner, connection.id)).token);
+    const sent = await service.sendMessage(owner, { connection_id: connection.id, thread_ref: "room", text: "Which seat?" });
+    const asked = await service.createQuestion(agent, { id: "q-seat", prompt: "Window or aisle?", options: ["window", "aisle"], thread_id: sent.thread.id });
+    assert.equal(asked.question.thread_id, sent.thread.id);
+  } finally {
+    await sql.end({ timeout: 5 });
+    await admin.unsafe(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+    for (const role of [`${prefix}agent`, `${prefix}owner`]) {
       await admin.unsafe(`DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${role}') THEN EXECUTE 'DROP OWNED BY ${role}'; EXECUTE 'DROP ROLE ${role}'; END IF; END $$`).catch(() => {});
     }
     await admin.end({ timeout: 5 });

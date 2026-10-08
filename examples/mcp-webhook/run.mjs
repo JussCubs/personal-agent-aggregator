@@ -55,8 +55,9 @@ export async function run(check) {
       expectEqual(note.status, 202, "notification status");
       const list = await mcp(url, token, "tools/list", {});
       const names = list.json.result.tools.map((t) => t.name);
-      expectEqual(names.length, 15, "tool count");
+      expectEqual(names.length, 18, "tool count");
       expect(names.includes("set_callback_webhook") && names.includes("create_question"), "expected tools present");
+      expect(["check_messages", "acknowledge_message", "post_message"].every((n) => names.includes(n)), "conversation tools present");
       expect(list.json.result.tools.every((t) => typeof t.annotations.readOnlyHint === "boolean"), "every tool has annotations");
     });
 

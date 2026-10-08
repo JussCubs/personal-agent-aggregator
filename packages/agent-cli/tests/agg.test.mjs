@@ -71,3 +71,55 @@ test("agg: setup stores the credential under $XDG_CONFIG_HOME/agent-aggregator a
   const poller = await agg(["install-poller", "--print"], { XDG_CONFIG_HOME: home });
   assert.match(poller.stdout, /^\* \* \* \* \* agg inbox --cursor-file '.*agent-aggregator\/inbox\.cursor' >> '.*poller\.log' 2>&1 # agent-aggregator-poller$/m);
 });
+
+test("agg: messages, working, reply, say and ask --thread speak the conversation API with documented exit codes", async (t) => {
+  const seen = [];
+  let open = [{ id: "11111111-1111-4111-8111-111111111111", thread_id: "22222222-2222-4222-8222-222222222222", direction: "to_agent", status: "delivered", text: "Rebook the 9:05" }];
+  const server = createServer((req, res) => {
+    const chunks = [];
+    req.on("data", (c) => chunks.push(c));
+    req.on("end", () => {
+      const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : null;
+      const url = new URL(req.url, "http://x");
+      seen.push({ method: req.method, path: url.pathname, query: Object.fromEntries(url.searchParams), body });
+      res.setHeader("content-type", "application/json");
+      if (req.method === "GET" && url.pathname === "/api/v1/messages") return res.end(JSON.stringify({ messages: open }));
+      if (req.method === "POST" && /^\/api\/v1\/messages\/[0-9a-f-]{36}\/ack$/.test(url.pathname)) return res.end(JSON.stringify({ message: { ...open[0], status: "working" } }));
+      if (req.method === "POST" && url.pathname === "/api/v1/messages") {
+        open = [];
+        res.statusCode = 201;
+        return res.end(JSON.stringify({ message: { id: "33333333-3333-4333-8333-333333333333", ...body }, thread: { id: "22222222-2222-4222-8222-222222222222" }, created: true }));
+      }
+      if (req.method === "POST" && url.pathname === "/api/v1/questions") return res.end(JSON.stringify({ question: { id: body.id, thread_id: body.thread_id }, created: true, revised: false }));
+      res.statusCode = 404;
+      res.end("{}");
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const env = { XDG_CONFIG_HOME: mkdtempSync(join(tmpdir(), "agg-cli-")), AGG_URL: `http://127.0.0.1:${server.address().port}/api`, AGG_TOKEN: `agg_${"t".repeat(43)}` };
+  const id = open[0].id;
+  const thread = open[0].thread_id;
+
+  const help = await agg(["help"], env);
+  for (const line of [/messages \[--thread ID\]/, /working --id MESSAGE_ID/, /reply --to MESSAGE_ID --text TEXT/, /say --text TEXT \[--thread ID\]/, /ask .*\[--thread ID\]/]) assert.match(help.stdout, line);
+
+  const listed = await agg(["messages", "--thread", thread], env);
+  assert.equal(listed.code, 0, "open messages exit 0");
+  assert.equal(JSON.parse(listed.stdout.trim()).text, "Rebook the 9:05");
+  assert.deepEqual(seen.at(-1).query, { thread_id: thread });
+  assert.equal((await agg(["working", "--id", id], env)).code, 0);
+  assert.deepEqual([seen.at(-1).method, seen.at(-1).path], ["POST", `/api/v1/messages/${id}/ack`]);
+  assert.equal((await agg(["reply", "--to", id, "--text", "Comparing fares", "--progress"], env)).code, 0);
+  assert.deepEqual(seen.at(-1).body, { text: "Comparing fares", reply_to: id, kind: "progress" });
+  assert.equal((await agg(["reply", "--to", id, "--text", "Rebooked on the 11:40", "--id", "reply-1"], env)).code, 0);
+  assert.deepEqual(seen.at(-1).body, { text: "Rebooked on the 11:40", id: "reply-1", reply_to: id, kind: "reply" });
+  assert.equal((await agg(["messages"], env)).code, 3, "nothing open exits 3");
+  assert.equal((await agg(["say", "--text", "Heads up: fares dropped", "--thread", thread], env)).code, 0);
+  assert.deepEqual(seen.at(-1).body, { text: "Heads up: fares dropped", thread_id: thread });
+  assert.equal((await agg(["ask", "--id", "q-seat", "--prompt", "Window or aisle?", "--option", "w=Window", "--thread", thread], env)).code, 0);
+  assert.equal(seen.at(-1).body.thread_id, thread);
+  assert.equal((await agg(["reply", "--text", "no target"], env)).code, 2, "reply needs --to");
+  assert.equal((await agg(["working"], env)).code, 2, "working needs --id");
+  assert.equal((await agg(["say"], env)).code, 2, "say needs --text");
+});

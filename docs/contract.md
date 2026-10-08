@@ -56,6 +56,7 @@ revoked. The server stores only SHA-256 digests of all of these
 | `hub:write` | Create and update this agent's tasks, goals, projects, state and checkpoints |
 | `hub:ask` | Ask the owner questions and request approvals |
 | `hub:handoff` | Hand goals to the owner's primary agent (each one waits for the owner's OK) |
+| `hub:chat` | Receive the owner's messages addressed to this agent and reply to them |
 <!-- END GENERATED: scopes -->
 
 A connection holds a set of scopes. A credential's effective scopes are the
@@ -93,6 +94,9 @@ except `POST /v1/claim` needs an agent credential. Request bodies are JSON
 | `GET` | `/v1/jobs` | `hub:read` or `hub:handoff` | `jobs.list` | read |
 | `GET` | `/v1/jobs/{id}` | `hub:read` or `hub:handoff` | `jobs.get` | read |
 | `POST` | `/v1/jobs/{id}/cancel` | `hub:handoff` | `jobs.cancel` | write |
+| `GET` | `/v1/messages` | `hub:chat` | `messages.check` | read |
+| `POST` | `/v1/messages` | `hub:chat` | `messages.post` | write |
+| `POST` | `/v1/messages/{id}/ack` | `hub:chat` | `messages.ack` | write |
 | `PUT` | `/v1/webhook` | `hub:read` | `webhook.set` | write |
 | `DELETE` | `/v1/webhook` | `hub:read` | `webhook.clear` | write |
 <!-- END GENERATED: rest-routes -->
@@ -236,6 +240,9 @@ the origin is `AGG_PUBLIC_URL`'s origin.
 | `handoff_goal` | Hand a goal to the owner's primary agent | `goal` | `hub:handoff` | false | false | true | false | handoff |
 | `get_job` | Get a handed-off job | `job_id` | `hub:read` or `hub:handoff` | true | false | true | false | read |
 | `cancel_job` | Cancel a handed-off job | `job_id` | `hub:handoff` | false | true | true | false | write |
+| `check_messages` | Check messages from the owner | none | `hub:chat` | true | false | true | false | read |
+| `post_message` | Reply to the owner | `text` | `hub:chat` | false | false | true | false | write |
+| `acknowledge_message` | Mark a message as being worked on | `message_id` | `hub:chat` | false | false | true | false | write |
 | `set_callback_webhook` | Set the wake-up webhook | `url` | `hub:read` | false | true | false | true | write |
 | `clear_callback_webhook` | Remove the wake-up webhook | none | `hub:read` | false | true | true | false | write |
 <!-- END GENERATED: mcp-tools -->
@@ -303,6 +310,7 @@ Envelope (inbox entry, webhook body and MCP event body): `eventId`, `name`, `tim
 | `answer.created` | The owner answered one of this connection's questions. | `question_id`, `kind`, `revision`, `status`, `work_item_id`, `answer` | `question_id`, `revision`, `status`, `answer` |
 | `question.updated` | A question was dismissed by the owner or expired. | `question_id`, `status`, `reason`, `revision` | `question_id`, `status` |
 | `job.updated` | A handed-off job changed status (needs_user, running, blocked, done, declined, cancelled, failed). | `job_id`, `status`, `status_reason`, `summary`, `result`, `revision`, `work_item_id`, `updated_at` | `job_id`, `status`, `revision` |
+| `message.created` | The owner sent you a message. Read it with check_messages (or use data.text) and answer with post_message. | `message_id`, `thread_id`, `thread_ref`, `text`, `created_at` | `message_id`, `thread_id`, `text` |
 
 `answer.created` `data.answer` fields: `choice`, `choice_label`, `text`, `decision`, `question_revision`, `action_digest`, `author`, `answered_at`, `acknowledged_at`.
 <!-- END GENERATED: events -->
@@ -495,6 +503,8 @@ Rate-limit refusals by surface:
 | `summaryLength` | 4000 |
 | `detailsLength` | 8000 |
 | `promptLength` | 1000 |
+| `messageLength` | 8000 |
+| `threadRefLength` | 128 |
 | `affectedActionLength` | 500 |
 | `actionDigestLength` | 128 |
 | `optionLabelLength` | 120 |
@@ -568,7 +578,7 @@ Report
   snapshot --file PATH|-      Push an explicit JSON snapshot (tasks, goals, projects, identity, memory_summary, connected_apps)
 
 Ask
-  ask --id ID --prompt TEXT [--option id=Label ...] [--approval] [--no-free-text] [--details TEXT] [--item ID] [--action TEXT] [--digest D] [--urgency low|normal|high] [--expires-in SECONDS]
+  ask --id ID --prompt TEXT [--option id=Label ...] [--approval] [--no-free-text] [--details TEXT] [--item ID] [--thread ID] [--action TEXT] [--digest D] [--urgency low|normal|high] [--expires-in SECONDS]
   answer --id ID [--wait SECONDS] [--interval SECONDS]   Exit 0 answered (JSON on stdout), 3 still pending, 5 cancelled/expired
   ack --id ID [--revision N]
   cancel --id ID
@@ -577,6 +587,12 @@ Inbox
   inbox [--cursor-file PATH] [--limit N] [--exec CMD]     Exit 0 new events (JSON lines), 3 nothing new. With --exec, the cursor only advances if CMD exits 0
   install-poller [--every-minutes N] [--exec CMD] [--cursor-file PATH] [--print]   Idempotent crontab entry
   uninstall-poller
+
+Messages from the owner
+  messages [--thread ID] [--wait SECONDS] [--interval SECONDS]   Exit 0 with open messages (JSON lines), 3 when there are none
+  working --id MESSAGE_ID                                        Show the owner you are on it
+  reply --to MESSAGE_ID --text TEXT [--id ID] [--progress]        Answer (or post progress on) one of the owner's messages
+  say --text TEXT [--thread ID] [--id ID]                          Post a new message to the owner
 
 Hand off
   handoff --goal TEXT [--key K] [--context TEXT] [--criteria TEXT] [--item ID]

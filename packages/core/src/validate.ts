@@ -15,6 +15,10 @@ const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const CONTROL_CHARS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/g;
 // Bidirectional overrides and isolates can make displayed text differ from stored text.
 const BIDI_CONTROLS = /[\u202A-\u202E\u2066-\u2069\u200E\u200F\u061C]/g;
+// Unicode line breaks other than \n and \r: LINE SEPARATOR, PARAGRAPH SEPARATOR and NEXT LINE (NEL, a C1
+// control). They are normalized to \n before anything else (single-line fields then turn line breaks into a
+// space), so a line-based filter downstream sees the same lines a renderer shows.
+const UNICODE_LINE_BREAKS = /[\u2028\u2029\u0085]/g;
 
 export type Raw = Record<string, unknown>;
 
@@ -32,7 +36,9 @@ export function cleanText(value: unknown, field: string, max: number, opts: { re
     return null;
   }
   if (typeof value !== "string") throw invalid(`${field} must be a string`, field);
-  let text = value.normalize("NFC").replace(CONTROL_CHARS, "").replace(BIDI_CONTROLS, "");
+  // Unicode line breaks become \n first; single-line fields then turn every run of line breaks into one space.
+  let text = value.replace(UNICODE_LINE_BREAKS, "\n");
+  text = text.normalize("NFC").replace(CONTROL_CHARS, "").replace(BIDI_CONTROLS, "");
   text = opts.multiline === false ? text.replace(/[\r\n\t]+/g, " ") : text.replace(/\r\n?/g, "\n");
   text = text.trim();
   if (!text) {
@@ -95,7 +101,7 @@ function checkJson(value: unknown, field: string, depth: number): JsonValue {
     if (!Number.isFinite(value)) throw invalid(`${field} contains a non-finite number`, field);
     return value;
   }
-  if (typeof value === "string") return value.replace(CONTROL_CHARS, "").replace(BIDI_CONTROLS, "");
+  if (typeof value === "string") return value.replace(UNICODE_LINE_BREAKS, "\n").replace(CONTROL_CHARS, "").replace(BIDI_CONTROLS, "");
   if (Array.isArray(value)) return value.map((item) => checkJson(item, field, depth + 1));
   if (typeof value === "object") {
     const out: Record<string, JsonValue> = {};

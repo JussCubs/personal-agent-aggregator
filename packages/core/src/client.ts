@@ -1,4 +1,4 @@
-import type { Checkpoint, ConnectionInfo, InboxPage, Job, Question, WorkItem } from "./contract.js";
+import type { Checkpoint, ConnectionInfo, InboxPage, Job, Message, Question, Thread, WorkItem } from "./contract.js";
 
 export class AggregatorApiError extends Error {
   readonly status: number;
@@ -129,6 +129,15 @@ export class AggregatorClient {
   }
   cancelJob(id: string): Promise<{ job: Job }> {
     return this.request("POST", `/v1/jobs/${encodeURIComponent(id)}/cancel`, { body: {} });
+  }
+  checkMessages(query: Query = {}): Promise<{ messages: Message[] }> {
+    return this.request("GET", "/v1/messages", { query });
+  }
+  postMessage(message: { text: string; reply_to?: string; thread_id?: string; kind?: "reply" | "progress"; id?: string }): Promise<{ message: Message; thread: Thread; created: boolean }> {
+    return this.request("POST", "/v1/messages", { body: message });
+  }
+  acknowledgeMessage(id: string): Promise<{ message: Message }> {
+    return this.request("POST", `/v1/messages/${encodeURIComponent(id)}/ack`, { body: {} });
   }
   setWebhook(config: { url: string; auth_header_name?: string; auth_header_value?: string }): Promise<{ url: string; auth_header_name: string | null; signing_secret: string }> {
     return this.request("PUT", "/v1/webhook", { body: config });

@@ -43,7 +43,7 @@ export function resolveSchemaNames(opts: PostgresSchemaOptions = {}): ResolvedSc
 }
 
 /** Child tables that carry (owner_id, connection_id) and are isolated per connection. */
-export const CONNECTION_TABLES = ["work_items", "checkpoints", "questions", "jobs", "events", "destinations", "deliveries", "audit"] as const;
+export const CONNECTION_TABLES = ["work_items", "checkpoints", "questions", "jobs", "events", "destinations", "deliveries", "threads", "messages", "audit"] as const;
 
 /**
  * Postgres DDL: tables, composite foreign keys that pin every child row to its
@@ -252,6 +252,7 @@ CREATE TABLE IF NOT EXISTS ${t("questions")} (
   options jsonb NOT NULL DEFAULT '[]'::jsonb,
   allow_free_text boolean NOT NULL DEFAULT true,
   work_item_id text,
+  thread_id uuid,
   affected_action text,
   action_digest text,
   urgency text NOT NULL DEFAULT 'normal' CHECK (urgency IN ('low','normal','high')),
@@ -267,6 +268,8 @@ CREATE TABLE IF NOT EXISTS ${t("questions")} (
   PRIMARY KEY (connection_id, id),
   ${child("questions")}
 );
+-- Columns added after 0.1.0: CREATE TABLE IF NOT EXISTS does not add them to an existing table.
+ALTER TABLE ${t("questions")} ADD COLUMN IF NOT EXISTS thread_id uuid;
 CREATE INDEX IF NOT EXISTS ${quoteIdent(`${n.prefix}questions_owner_status`)} ON ${t("questions")} (owner_id, status, created_at DESC);
 CREATE INDEX IF NOT EXISTS ${quoteIdent(`${n.prefix}questions_expiry`)} ON ${t("questions")} (expires_at) WHERE status = 'pending' AND expires_at IS NOT NULL;
 
@@ -347,6 +350,45 @@ CREATE TABLE IF NOT EXISTS ${t("deliveries")} (
 );
 CREATE INDEX IF NOT EXISTS ${quoteIdent(`${n.prefix}deliveries_due`)} ON ${t("deliveries")} (next_attempt_at) WHERE status = 'pending';
 
+CREATE TABLE IF NOT EXISTS ${t("threads")} (
+  id uuid PRIMARY KEY,
+  owner_id uuid NOT NULL,
+  connection_id uuid NOT NULL,
+  ref text NOT NULL,
+  title text,
+  message_seq bigint NOT NULL DEFAULT 0,
+  created_at timestamptz NOT NULL,
+  updated_at timestamptz NOT NULL,
+  UNIQUE (connection_id, ref),
+  UNIQUE (id, connection_id),
+  ${child("threads")}
+);
+
+CREATE TABLE IF NOT EXISTS ${t("messages")} (
+  id uuid PRIMARY KEY,
+  owner_id uuid NOT NULL,
+  connection_id uuid NOT NULL,
+  thread_id uuid NOT NULL,
+  seq bigint NOT NULL,
+  direction text NOT NULL CHECK (direction IN ('to_agent','from_agent')),
+  kind text NOT NULL CHECK (kind IN ('message','reply','progress')),
+  body_enc text NOT NULL,
+  client_id text,
+  reply_to uuid,
+  status text NOT NULL CHECK (status IN ('queued','delivered','working','replied','failed','posted')),
+  status_reason text,
+  created_at timestamptz NOT NULL,
+  delivered_at timestamptz,
+  working_at timestamptz,
+  replied_at timestamptz,
+  updated_at timestamptz NOT NULL,
+  UNIQUE (connection_id, direction, client_id),
+  CONSTRAINT ${quoteIdent(`${n.prefix}messages_thread_fk`)} FOREIGN KEY (thread_id, connection_id) REFERENCES ${t("threads")}(id, connection_id) ON DELETE CASCADE,
+  ${child("messages")}
+);
+CREATE INDEX IF NOT EXISTS ${quoteIdent(`${n.prefix}messages_thread`)} ON ${t("messages")} (thread_id, seq);
+CREATE INDEX IF NOT EXISTS ${quoteIdent(`${n.prefix}messages_open`)} ON ${t("messages")} (connection_id, created_at) WHERE direction = 'to_agent' AND status IN ('queued','delivered','working');
+
 CREATE TABLE IF NOT EXISTS ${t("audit")} (
   id uuid PRIMARY KEY,
   owner_id uuid NOT NULL,
@@ -420,7 +462,7 @@ GRANT UPDATE (revoked_at) ON ${t("credentials")} TO ${owner};
 
 ${policies("work_items", scopedToConnection, "SELECT, INSERT, UPDATE, DELETE", "SELECT, UPDATE, DELETE")}
 ${policies("checkpoints", scopedToConnection, "SELECT, INSERT", "SELECT, DELETE")}
-${policies("questions", scopedToConnection, "SELECT, INSERT, UPDATE (kind, prompt, details, options, allow_free_text, work_item_id, affected_action, action_digest, urgency, expires_at, revision, updated_at, status, status_reason, acknowledged_at, answer)", "SELECT, UPDATE, DELETE")}
+${policies("questions", scopedToConnection, "SELECT, INSERT, UPDATE (kind, prompt, details, options, allow_free_text, work_item_id, thread_id, affected_action, action_digest, urgency, expires_at, revision, updated_at, status, status_reason, acknowledged_at, answer)", "SELECT, UPDATE, DELETE")}
 ${policies("jobs", scopedToConnection, "SELECT, INSERT, UPDATE (status, status_reason, revision, updated_at, completed_at)", "SELECT, UPDATE, DELETE")}
 
 -- Agents may revise or withdraw their own pending question and acknowledge an
@@ -462,6 +504,27 @@ ${policies("events", scopedToConnection, "SELECT, INSERT", "SELECT, INSERT, DELE
 ${policies("destinations", scopedToConnection, "SELECT (id, owner_id, connection_id, kind, external_id, event_name, filter, url, auth_header_name, expires_at, created_at, updated_at), INSERT, UPDATE, DELETE", "SELECT (id, owner_id, connection_id, kind, external_id, event_name, filter, url, auth_header_name, expires_at, created_at, updated_at), INSERT, UPDATE, DELETE")}
 ${policies("deliveries", scopedToConnection, "SELECT, INSERT", "SELECT, INSERT, DELETE")}
 ${policies("audit", scopedToConnection, "INSERT", "SELECT, INSERT, DELETE")}
+${policies("threads", scopedToConnection, "SELECT, INSERT, UPDATE (title, updated_at, message_seq)", "SELECT, INSERT, UPDATE, DELETE")}
+${policies("messages", scopedToConnection, "SELECT, INSERT, UPDATE (status, status_reason, delivered_at, working_at, replied_at, updated_at)", "SELECT, INSERT, UPDATE, DELETE")}
+
+-- Agents post their own messages and move the owner's messages to them through
+-- delivered → working → replied; they never edit text or the owner's side.
+CREATE OR REPLACE FUNCTION ${s}.${quoteIdent(`${n.prefix}guard_agent_message`)}() RETURNS trigger LANGUAGE plpgsql AS $fn$
+BEGIN
+  IF current_user = ${lit(n.agentRole)} THEN
+    IF TG_OP = 'INSERT' THEN
+      IF NEW.direction <> 'from_agent' OR NEW.status <> 'posted' THEN
+        RAISE EXCEPTION 'agents may only post their own messages' USING ERRCODE = '42501';
+      END IF;
+    ELSIF OLD.direction <> 'to_agent' OR NEW.status NOT IN ('delivered', 'working', 'replied') OR OLD.status IN ('replied', 'failed') THEN
+      RAISE EXCEPTION 'agents may only acknowledge messages addressed to them' USING ERRCODE = '42501';
+    END IF;
+  END IF;
+  RETURN NEW;
+END
+$fn$;
+DROP TRIGGER IF EXISTS ${quoteIdent(`${n.prefix}messages_agent_guard`)} ON ${t("messages")};
+CREATE TRIGGER ${quoteIdent(`${n.prefix}messages_agent_guard`)} BEFORE INSERT OR UPDATE ON ${t("messages")} FOR EACH ROW EXECUTE FUNCTION ${s}.${quoteIdent(`${n.prefix}guard_agent_message`)}();
 
 -- OAuth client registrations and authorization requests are service-only.
 ALTER TABLE ${t("oauth_clients")} ENABLE ROW LEVEL SECURITY;
@@ -493,6 +556,15 @@ export function postgresSchemaProbeSql(opts: PostgresSchemaOptions = {}): string
   return `SELECT coalesce(obj_description(to_regclass('${regclass}'), 'pg_class'), '') = '${SCHEMA_MARKER}${postgresSchemaVersion(opts)}' AS current`;
 }
 
+/**
+ * Columns added to existing SQLite tables after 0.1.0. SQLite has no
+ * `ADD COLUMN IF NOT EXISTS`, so the SQLite driver's migrate() adds each one
+ * that `PRAGMA table_info` does not list yet.
+ */
+export const SQLITE_ADDED_COLUMNS: ReadonlyArray<{ table: string; column: string; definition: string }> = [
+  { table: "questions", column: "thread_id", definition: "TEXT" },
+];
+
 /** SQLite DDL for single-owner local use. SQLite has no row-level security; the service always filters by owner and connection. */
 export function sqliteSchemaSql(prefixInput = "aggregator_"): string {
   const p = assertPrefix(prefixInput);
@@ -522,7 +594,7 @@ CREATE TABLE IF NOT EXISTS ${p}checkpoints (
 CREATE TABLE IF NOT EXISTS ${p}questions (
   key TEXT NOT NULL UNIQUE, owner_id TEXT NOT NULL, connection_id TEXT NOT NULL, id TEXT NOT NULL,
   kind TEXT NOT NULL CHECK (kind IN ('question','approval')), prompt TEXT NOT NULL, details TEXT, options TEXT NOT NULL DEFAULT '[]',
-  allow_free_text INTEGER NOT NULL DEFAULT 1, work_item_id TEXT, affected_action TEXT, action_digest TEXT,
+  allow_free_text INTEGER NOT NULL DEFAULT 1, work_item_id TEXT, thread_id TEXT, affected_action TEXT, action_digest TEXT,
   urgency TEXT NOT NULL DEFAULT 'normal' CHECK (urgency IN ('low','normal','high')),
   status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','answered','cancelled','expired')), status_reason TEXT,
   revision INTEGER NOT NULL DEFAULT 1, expires_at TEXT, answer TEXT, answered_at TEXT, acknowledged_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
@@ -548,6 +620,18 @@ CREATE TABLE IF NOT EXISTS ${p}deliveries (
   status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','delivered','failed')), attempts INTEGER NOT NULL DEFAULT 0,
   next_attempt_at TEXT NOT NULL, last_status INTEGER, last_error TEXT, delivered_at TEXT, created_at TEXT NOT NULL, UNIQUE (destination_id, event_seq),
   FOREIGN KEY (destination_id, connection_id) REFERENCES ${p}destinations(id, connection_id) ON DELETE CASCADE,
+  FOREIGN KEY (connection_id, owner_id) REFERENCES ${p}connections(id, owner_id) ON DELETE CASCADE);
+CREATE TABLE IF NOT EXISTS ${p}threads (
+  id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, connection_id TEXT NOT NULL, ref TEXT NOT NULL, title TEXT, message_seq INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+  UNIQUE (connection_id, ref), UNIQUE (id, connection_id),
+  FOREIGN KEY (connection_id, owner_id) REFERENCES ${p}connections(id, owner_id) ON DELETE CASCADE);
+CREATE TABLE IF NOT EXISTS ${p}messages (
+  id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, connection_id TEXT NOT NULL, thread_id TEXT NOT NULL, seq INTEGER NOT NULL,
+  direction TEXT NOT NULL CHECK (direction IN ('to_agent','from_agent')), kind TEXT NOT NULL CHECK (kind IN ('message','reply','progress')),
+  body_enc TEXT NOT NULL, client_id TEXT, reply_to TEXT,
+  status TEXT NOT NULL CHECK (status IN ('queued','delivered','working','replied','failed','posted')), status_reason TEXT,
+  created_at TEXT NOT NULL, delivered_at TEXT, working_at TEXT, replied_at TEXT, updated_at TEXT NOT NULL, UNIQUE (connection_id, direction, client_id),
+  FOREIGN KEY (thread_id, connection_id) REFERENCES ${p}threads(id, connection_id) ON DELETE CASCADE,
   FOREIGN KEY (connection_id, owner_id) REFERENCES ${p}connections(id, owner_id) ON DELETE CASCADE);
 CREATE TABLE IF NOT EXISTS ${p}audit (
   id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, connection_id TEXT, actor TEXT NOT NULL, action TEXT NOT NULL,

@@ -14,7 +14,7 @@ WITH t AS (
 ),
 connection_tables(name) AS (
   VALUES ('aggregator_connections'), ('aggregator_work_items'), ('aggregator_checkpoints'), ('aggregator_questions'), ('aggregator_jobs'),
-         ('aggregator_events'), ('aggregator_destinations'), ('aggregator_deliveries'), ('aggregator_audit')
+         ('aggregator_events'), ('aggregator_destinations'), ('aggregator_deliveries'), ('aggregator_threads'), ('aggregator_messages'), ('aggregator_audit')
 ),
 owner_tables(name) AS (
   SELECT name FROM connection_tables UNION ALL VALUES ('aggregator_credentials')
@@ -23,7 +23,7 @@ exposed(role) AS (
   SELECT 'public' UNION ALL SELECT rolname FROM pg_roles WHERE rolname IN ('anon', 'authenticated', 'service_role')
 )
 SELECT '1 rls_enabled_and_forced' AS check_name,
-       CASE WHEN count(*) >= 13 AND bool_and(relrowsecurity AND relforcerowsecurity) THEN 'PASS' ELSE 'FAIL' END AS result,
+       CASE WHEN count(*) >= 15 AND bool_and(relrowsecurity AND relforcerowsecurity) THEN 'PASS' ELSE 'FAIL' END AS result,
        count(*) FILTER (WHERE relrowsecurity AND relforcerowsecurity) || ' of ' || count(*) || ' tables' AS detail
 FROM t
 UNION ALL
@@ -33,10 +33,10 @@ SELECT '2 scoped_roles_cannot_login_or_bypass',
 FROM pg_roles WHERE rolname IN ('aggregator_agent', 'aggregator_owner')
 UNION ALL
 SELECT '3 policies_present',
-       CASE WHEN (SELECT count(*) FROM connection_tables ct WHERE EXISTS (SELECT 1 FROM pg_policies p WHERE p.schemaname = 'public' AND p.tablename = ct.name AND 'aggregator_agent' = ANY (p.roles))) = 9
-             AND (SELECT count(*) FROM owner_tables ot WHERE EXISTS (SELECT 1 FROM pg_policies p WHERE p.schemaname = 'public' AND p.tablename = ot.name AND 'aggregator_owner' = ANY (p.roles))) = 10
+       CASE WHEN (SELECT count(*) FROM connection_tables ct WHERE EXISTS (SELECT 1 FROM pg_policies p WHERE p.schemaname = 'public' AND p.tablename = ct.name AND 'aggregator_agent' = ANY (p.roles))) = 11
+             AND (SELECT count(*) FROM owner_tables ot WHERE EXISTS (SELECT 1 FROM pg_policies p WHERE p.schemaname = 'public' AND p.tablename = ot.name AND 'aggregator_owner' = ANY (p.roles))) = 12
             THEN 'PASS' ELSE 'FAIL' END,
-       (SELECT count(*) FROM pg_policies WHERE schemaname = 'public' AND tablename LIKE 'aggregator\_%') || ' policies; agent on 9 connection tables, owner on 10'
+       (SELECT count(*) FROM pg_policies WHERE schemaname = 'public' AND tablename LIKE 'aggregator\_%') || ' policies; agent on 11 connection tables, owner on 12'
 UNION ALL
 SELECT '4 no_privileges_for_public_anon_authenticated_service_role',
        CASE WHEN count(*) = 0 THEN 'PASS' ELSE 'FAIL' END,
@@ -53,14 +53,16 @@ SELECT '5 column_boundaries',
              AND NOT has_column_privilege('aggregator_agent', 'public.aggregator_connections', 'status', 'UPDATE')
              AND NOT has_table_privilege('aggregator_agent', 'public.aggregator_oauth_requests', 'SELECT')
              AND NOT has_table_privilege('aggregator_owner', 'public.aggregator_oauth_requests', 'SELECT')
+             AND NOT has_column_privilege('aggregator_agent', 'public.aggregator_messages', 'body_enc', 'UPDATE')
+             AND NOT has_column_privilege('aggregator_agent', 'public.aggregator_messages', 'direction', 'UPDATE')
             THEN 'PASS' ELSE 'FAIL' END,
-       'agents: no credentials, no encrypted secrets, cannot change scopes or status; nobody but the API role reads OAuth requests'
+       'agents: no credentials, no encrypted secrets, cannot change scopes or status or rewrite message text; nobody but the API role reads OAuth requests'
 UNION ALL
 SELECT '6 agent_guard_triggers_enabled',
-       CASE WHEN count(*) = 2 AND bool_and(tg.tgenabled <> 'D') THEN 'PASS' ELSE 'FAIL' END,
+       CASE WHEN count(*) = 3 AND bool_and(tg.tgenabled <> 'D') THEN 'PASS' ELSE 'FAIL' END,
        coalesce(string_agg(tg.tgname || ' on ' || c.relname, ', ' ORDER BY tg.tgname), 'missing')
 FROM pg_trigger tg JOIN pg_class c ON c.oid = tg.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace
-WHERE n.nspname = 'public' AND tg.tgname IN ('aggregator_questions_agent_guard', 'aggregator_jobs_agent_guard');
+WHERE n.nspname = 'public' AND tg.tgname IN ('aggregator_questions_agent_guard', 'aggregator_jobs_agent_guard', 'aggregator_messages_agent_guard');
 
 -- 7: an agent principal that matches no connection sees nothing (every table the agent role may read;
 -- it has no SELECT on audit, credentials or the OAuth tables at all).
@@ -70,7 +72,8 @@ SET LOCAL ROLE aggregator_agent;
 SELECT '7 unknown_agent_sees_no_rows' AS check_name, CASE WHEN n = 0 THEN 'PASS' ELSE 'FAIL' END AS result, n || ' rows visible' AS detail
 FROM (SELECT (SELECT count(*) FROM aggregator_connections) + (SELECT count(*) FROM aggregator_work_items) + (SELECT count(*) FROM aggregator_checkpoints)
            + (SELECT count(*) FROM aggregator_questions) + (SELECT count(*) FROM aggregator_jobs) + (SELECT count(*) FROM aggregator_events)
-           + (SELECT count(*) FROM aggregator_destinations) + (SELECT count(*) FROM aggregator_deliveries) AS n) AS probe;
+           + (SELECT count(*) FROM aggregator_destinations) + (SELECT count(*) FROM aggregator_deliveries)
+           + (SELECT count(*) FROM aggregator_threads) + (SELECT count(*) FROM aggregator_messages) AS n) AS probe;
 ROLLBACK;
 
 -- 8: no principal at all sees nothing, for either role.

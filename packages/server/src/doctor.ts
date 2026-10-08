@@ -31,7 +31,7 @@ export async function runDoctor(config: StorageConfig, storage: Storage): Promis
       db.query(`SELECT count(*) AS n FROM sqlite_master WHERE type = 'table' AND name LIKE '${TABLE_PREFIX}%'`),
     );
     const n = Number(tables[0]?.n ?? 0);
-    checks.push({ name: "schema_tables", pass: n >= 13, detail: `${n} tables with prefix ${TABLE_PREFIX}` });
+    checks.push({ name: "schema_tables", pass: n >= 15, detail: `${n} tables with prefix ${TABLE_PREFIX}` });
     checks.push({ name: "isolation", pass: true, detail: "SQLite has no row-level security: single owner on one machine only" });
     return checks;
   }
@@ -62,7 +62,7 @@ export async function runDoctor(config: StorageConfig, storage: Storage): Promis
   );
   const total = Number(rls.total ?? 0);
   const forced = Number(rls.forced ?? 0);
-  checks.push({ name: "rls_forced", pass: total >= 13 && forced === total, detail: `${forced}/${total} tables have row-level security enabled and forced` });
+  checks.push({ name: "rls_forced", pass: total >= 15 && forced === total, detail: `${forced}/${total} tables have row-level security enabled and forced` });
   const roles = await one(
     `SELECT count(*) AS present, coalesce(bool_or(has_table_privilege(r.rolname, c.oid, 'SELECT,INSERT,UPDATE,DELETE')), false) AS any_privilege
      FROM pg_roles r CROSS JOIN pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace

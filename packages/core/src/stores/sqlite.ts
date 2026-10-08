@@ -1,5 +1,5 @@
 import { translateForSqlite, type AccessScope, type Db, type Row, type SqlDriver } from "../db.js";
-import { sqliteSchemaSql } from "../schema.js";
+import { SQLITE_ADDED_COLUMNS, sqliteSchemaSql } from "../schema.js";
 
 /**
  * Local, single-owner storage on Node's built-in SQLite (Node >= 22.5).
@@ -60,6 +60,12 @@ export async function createSqliteDriver(path: string, opts: { prefix?: string }
     privileged: <T>(fn: (db: Db) => Promise<T>) => transaction(fn),
     async migrate(): Promise<void> {
       database.exec(sqliteSchemaSql(opts.prefix));
+      const prefix = opts.prefix ?? "aggregator_";
+      for (const added of SQLITE_ADDED_COLUMNS) {
+        const table = `${prefix}${added.table}`;
+        const columns = database.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+        if (!columns.some((column) => column.name === added.column)) database.exec(`ALTER TABLE ${table} ADD COLUMN ${added.column} ${added.definition}`);
+      }
     },
     async close(): Promise<void> {
       await queue;

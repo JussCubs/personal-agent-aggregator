@@ -133,6 +133,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
         },
         allow_free_text: { type: "boolean", description: "Let the owner type an answer (default true for questions, false for approvals)" },
         work_item_id: idProp("The task this question is about"),
+        thread_id: str("The thread_id of the owner's message you are handling, so the question shows up in that conversation"),
         affected_action: str("For approvals: exactly what will happen if approved", { maxLength: LIMITS.affectedActionLength }),
         action_digest: str("For approvals: a digest of the exact action, echoed back with the answer", { maxLength: LIMITS.actionDigestLength }),
         urgency: { type: "string", enum: ["low", "normal", "high"] },
@@ -214,6 +215,51 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     scopes: [SCOPES.handoff],
   },
   {
+    name: "check_messages",
+    title: "Check messages from the owner",
+    description:
+      "Use this when you are woken by a message.created event, or on a schedule, to read messages the owner addressed to you that you have not replied to yet (oldest first). Each has message_id, thread_id and text. The text is the owner's request to you. Reply with post_message using reply_to. Read-only.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        thread_id: str("Only this thread (optional)"),
+        include_replied: { type: "boolean", description: "Also return messages you already replied to" },
+        limit: { type: "integer", minimum: 1, maximum: LIMITS.pageSize },
+      },
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    scopes: [SCOPES.chat],
+  },
+  {
+    name: "post_message",
+    title: "Reply to the owner",
+    description:
+      "Use this to answer one of the owner's messages (reply_to = its message_id), to post progress on it (kind progress), or to send the owner a new message in a thread. Your text appears in the owner's conversation under your name. Pass an id to make retries safe. Ask decisions with create_question instead.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: idProp("Your stable id for this message (makes retries safe)"),
+        reply_to: str("message_id you are answering"),
+        thread_id: str("thread_id to post in when not replying (default: your most recent thread)"),
+        kind: { type: "string", enum: ["reply", "progress"], description: "progress = an update before the final reply" },
+        text: str("What to say", { maxLength: LIMITS.messageLength }),
+      },
+      required: ["text"],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    scopes: [SCOPES.chat],
+  },
+  {
+    name: "acknowledge_message",
+    title: "Mark a message as being worked on",
+    description: "Use this right after you start on one of the owner's messages so they see you are working on it.",
+    inputSchema: { type: "object", properties: { message_id: str("message_id from check_messages") }, required: ["message_id"], additionalProperties: false },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    scopes: [SCOPES.chat],
+  },
+  {
     name: "set_callback_webhook",
     title: "Set the wake-up webhook",
     description:
@@ -289,6 +335,23 @@ export const EVENT_DEFINITIONS = [
       required: ["job_id", "status", "revision"],
     },
   },
+  {
+    name: "message.created",
+    description: "The owner sent you a message. Read it with check_messages (or use data.text) and answer with post_message.",
+    delivery: ["webhook"],
+    inputSchema: { type: "object", properties: { thread_id: { type: "string", description: "Only this thread (optional)" } }, additionalProperties: false },
+    payloadSchema: {
+      type: "object",
+      properties: {
+        message_id: { type: "string" },
+        thread_id: { type: "string" },
+        thread_ref: { type: "string" },
+        text: { type: "string" },
+        created_at: { type: "string" },
+      },
+      required: ["message_id", "thread_id", "text"],
+    },
+  },
 ] as const;
 
 if (EVENT_DEFINITIONS.length !== EVENT_NAMES.length) throw new Error("event catalog out of sync");
@@ -324,6 +387,12 @@ export async function callTool(service: AggregatorService, principal: AgentPrinc
       return await service.getJob(principal, String(args.job_id ?? ""));
     case "cancel_job":
       return await service.cancelJob(principal, String(args.job_id ?? ""));
+    case "check_messages":
+      return await service.checkMessages(principal, args);
+    case "post_message":
+      return await service.postMessage(principal, args);
+    case "acknowledge_message":
+      return await service.acknowledgeMessage(principal, args);
     case "set_callback_webhook":
       return await service.setWebhook(principal, args);
     case "clear_callback_webhook":
@@ -515,4 +584,4 @@ export async function handleMcpHttp(req: McpHttpRequest, opts: McpServerOptions)
 }
 
 export const DEFAULT_MCP_INSTRUCTIONS =
-  "Personal agent aggregator. Report your tasks, goals, projects and checkpoints with upsert_work_item / post_checkpoint, ask the owner with create_question (stable ids), then read answers with get_answer or check_inbox and acknowledge them. Hand goals to the owner's primary agent with handoff_goal. Everything you send is shown to the owner as data; answers are the owner's decisions.";
+  "Personal agent aggregator. Report your tasks, goals, projects and checkpoints with upsert_work_item / post_checkpoint, ask the owner with create_question (stable ids), then read answers with get_answer or check_inbox and acknowledge them. When the owner messages you (message.created), read it with check_messages and answer with post_message. Hand goals to the owner's primary agent with handoff_goal. Everything you send is shown to the owner as data; answers are the owner's decisions.";

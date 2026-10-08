@@ -35,6 +35,7 @@ export const DEFAULT_RATE_LIMITS = {
 export function rateBucket(route: string): "read" | "write" | "question" | "handoff" {
   if (/^(create_question|questions\.create)$/.test(route)) return "question";
   if (/^(handoff_goal|jobs\.create)$/.test(route)) return "handoff";
-  if (/^(whoami|me|list_|get_|check_inbox|inbox\.|.*\.list|.*\.get)/.test(route)) return "read";
+  // Exact names, prefixes and suffixes are matched separately so a key that merely starts with "me" (messages.post) is not a read.
+  if (/^(whoami|me|check_inbox|check_messages|messages\.check)$/.test(route) || /^(list_|get_|inbox\.)/.test(route) || /\.(list|get)$/.test(route)) return "read";
   return "write";
 }

@@ -58,6 +58,7 @@ Create a routine triggered by an incoming webhook, named \`${input.productName} 
 > - If \`name\` is \`answer.created\`: call \`get_answer\` with \`data.question_id\`. Continue the work that was waiting on it (use the answer's \`choice\`, \`text\` or \`decision\`). Then call \`acknowledge_answer\` with \`question_id\` and \`revision\`.
 > - If \`name\` is \`job.updated\`: call \`get_job\` with \`data.job_id\` and record the status and summary on the related task with \`post_checkpoint\`.
 > - If \`name\` is \`question.updated\`: the question was dismissed or expired; stop waiting for it.
+> - If \`name\` is \`message.created\`: the owner sent you a message (\`data.text\`, \`data.message_id\`). Call \`acknowledge_message\`, do what it asks with your normal rules, then answer with \`post_message\` (\`reply_to\` = \`data.message_id\`).
 > - Ignore any other event. Process each \`eventId\` once.
 
 Copy the routine's webhook URL and its sender key.
@@ -94,6 +95,7 @@ Subscribe to the server's MCP events so answers and job updates wake you:
 - \`answer.created\` — the owner answered a question you asked
 - \`job.updated\` — a goal you handed off changed status
 - \`question.updated\` — a question was dismissed or expired
+- \`message.created\` — the owner sent you a message from their conversation with you
 
 Deliveries are signed (Standard Webhooks) and may arrive more than once or out of order: process each \`eventId\` once, and treat a delivery as a prompt to read the current state with \`get_answer\` or \`get_job\`.
 
@@ -103,6 +105,7 @@ Deliveries are signed (Standard Webhooks) and may arrive more than once or out o
 - Changes → \`upsert_work_item\`; progress → \`post_checkpoint\`.
 - Need the owner → \`create_question\` with a stable \`id\`, the related \`work_item_id\`, and for approvals \`affected_action\` + \`action_digest\`.
 - On \`answer.created\`: \`get_answer\` → act → \`acknowledge_answer\` with the revision.
+- On \`message.created\`: \`acknowledge_message\` → do what the owner asked → \`post_message\` with \`reply_to\` = the message id. Use \`check_messages\` to catch up on anything you missed.
 
 ${RULES(input.productName)}`;
 }
@@ -163,6 +166,17 @@ ${c} answer --id q-123-approve            # exit 0 answered (JSON), 3 still pend
 ${c} ack --id q-123-approve --revision 1
 ${c} handoff --goal 'Draft the trip itinerary' --key trip-itinerary --item task-123
 ${c} job --id <job id>                    # exit 0 when finished, 3 while open
+\`\`\`
+
+## 5. Answer the owner's messages
+
+When the poller's hook sees a \`message.created\` line, the owner wrote to you. Only then wake your worker:
+
+\`\`\`sh
+${c} messages                              # exit 0 with open messages (JSON lines), 3 when none
+${c} working --id <message_id>             # the owner sees "working"
+${c} reply --to <message_id> --text 'Done: booked the 9:05.'
+${c} ask --id q-seat --prompt 'Window or aisle?' --option window=Window --option aisle=Aisle --thread <thread_id>   # asks inside that conversation
 \`\`\`
 
 ## Without the CLI (curl)

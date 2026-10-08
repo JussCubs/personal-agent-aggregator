@@ -90,8 +90,11 @@ function restRoutes() {
   const routes = [];
   const pattern = /\{ method: "(\w+)", pattern: (?:\/\^(.+?)\$\/|new RegExp\(`\^(.+?)\$`\)), key: "([\w.]+)"/g;
   for (const match of source.matchAll(pattern)) {
-    const raw = (match[2] ?? match[3]).replace(/\\\//g, "/").replace(/\$\{SEGMENT\}/g, "{id}");
-    routes.push({ method: match[1], path: raw, key: match[4] });
+    const routePattern = (match[2] ?? match[3]).replace(/\\\//g, "/");
+    // ${SEGMENT} is an id; ([0-9a-f-]{36}) is a UUID (message ids).
+    const uuid = routePattern.includes("([0-9a-f-]{36})");
+    const raw = routePattern.replace(/\$\{SEGMENT\}/g, "{id}").replace("([0-9a-f-]{36})", "{id}");
+    routes.push({ method: match[1], path: raw, key: match[4], uuid });
   }
   if (routes.length < 20) throw new Error(`parsed only ${routes.length} routes from rest.ts`);
   return routes;
@@ -107,7 +110,7 @@ async function sections() {
 
   const rows = [[code("POST"), code("/v1/claim"), "none (one-time setup code in the body)", code("claim"), "per IP"]];
   for (const route of restRoutes()) {
-    const path = route.path.replace("{id}", "x");
+    const path = route.path.replace("{id}", route.uuid ? randomUUID() : "x");
     const res = await handleAgentRest({ method: route.method, path, query: {}, body: {}, authorization: "Bearer probe" }, { service: probe.service, authenticate: async () => probe.none, challenge: () => "Bearer" });
     const unauth = await handleAgentRest({ method: route.method, path, query: {}, body: {}, authorization: undefined }, { service: probe.service, authenticate: async () => null, challenge: () => "Bearer" });
     if (unauth.status !== 401) throw new Error(`${route.method} ${route.path} did not require authentication`);
@@ -144,6 +147,7 @@ async function sections() {
   await service.sweep();
   const { job } = await service.handoffJob(full, { goal: "Do it" });
   await service.decideJob(owner, { connection_id: connection.id, job_id: job.id, approve: true });
+  await service.sendMessage(owner, { connection_id: connection.id, thread_ref: "probe-thread", text: "Hello agent" });
   const inbox = await service.readInbox(full, {});
   const emitted = {};
   for (const event of inbox.events) emitted[event.name] = new Set([...(emitted[event.name] ?? []), ...Object.keys(event.data)]);

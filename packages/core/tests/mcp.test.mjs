@@ -69,7 +69,7 @@ test("modern 2026-07-28 requests: discover, headers, resultType, events", async 
   assert.equal(unknown.status, 404);
   assert.equal(JSON.parse(unknown.body).error.code, -32601);
   const events = JSON.parse((await call({ jsonrpc: "2.0", id: 7, method: "events/list", params: { _meta: meta } }, headers)).body).result;
-  assert.deepEqual(events.events.map((e) => e.name), ["answer.created", "question.updated", "job.updated"]);
+  assert.deepEqual(events.events.map((e) => e.name), ["answer.created", "question.updated", "job.updated", "message.created"]);
   const sub = JSON.parse((await call({
     jsonrpc: "2.0", id: 8, method: "events/subscribe",
     params: { _meta: meta, name: "answer.created", arguments: {}, delivery: { mode: "webhook", url: "http://127.0.0.1:9/e", secret: `whsec_${Buffer.alloc(32, 3).toString("base64")}` }, cursor: null },

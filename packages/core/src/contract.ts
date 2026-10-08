@@ -16,6 +16,8 @@ export const LIMITS = {
   summaryLength: 4000,
   detailsLength: 8000,
   promptLength: 1000,
+  messageLength: 8000,
+  threadRefLength: 128,
   affectedActionLength: 500,
   actionDigestLength: 128,
   optionLabelLength: 120,
@@ -43,15 +45,17 @@ export const SCOPES = {
   write: "hub:write",
   ask: "hub:ask",
   handoff: "hub:handoff",
+  chat: "hub:chat",
 } as const;
 export type Scope = (typeof SCOPES)[keyof typeof SCOPES];
-export const ALL_SCOPES: readonly Scope[] = [SCOPES.read, SCOPES.write, SCOPES.ask, SCOPES.handoff];
+export const ALL_SCOPES: readonly Scope[] = [SCOPES.read, SCOPES.write, SCOPES.ask, SCOPES.handoff, SCOPES.chat];
 
 export const SCOPE_DESCRIPTIONS: Record<Scope, string> = {
   "hub:read": "Read the work items, answers, inbox and jobs this agent created",
   "hub:write": "Create and update this agent's tasks, goals, projects, state and checkpoints",
   "hub:ask": "Ask the owner questions and request approvals",
   "hub:handoff": "Hand goals to the owner's primary agent (each one waits for the owner's OK)",
+  "hub:chat": "Receive the owner's messages addressed to this agent and reply to them",
 };
 
 export function parseScopes(value: string | readonly string[] | null | undefined): Scope[] {
@@ -138,6 +142,8 @@ export interface Question {
   options: QuestionOption[];
   allow_free_text: boolean;
   work_item_id: string | null;
+  /** The conversation thread it was asked in, if any (hosts show it there). */
+  thread_id: string | null;
   affected_action: string | null;
   action_digest: string | null;
   urgency: Urgency;
@@ -171,8 +177,46 @@ export interface Job {
   completed_at: string | null;
 }
 
-export type EventName = "answer.created" | "question.updated" | "job.updated";
-export const EVENT_NAMES: readonly EventName[] = ["answer.created", "question.updated", "job.updated"];
+export type EventName = "answer.created" | "question.updated" | "job.updated" | "message.created";
+export const EVENT_NAMES: readonly EventName[] = ["answer.created", "question.updated", "job.updated", "message.created"];
+
+/**
+ * Conversation bridge: the owner can address messages to a connected agent in
+ * a thread (the host maps a thread to one of its own conversations through
+ * `ref`). Bodies are encrypted at rest.
+ *
+ * Owner → agent statuses: queued (stored, wake pending) → delivered (wake
+ * accepted or the agent read it) → working (the agent said so or posted
+ * progress) → replied (the agent replied to it). failed means the message was
+ * not picked up or not answered in time, or delivery gave up.
+ */
+export type MessageDirection = "to_agent" | "from_agent";
+export type MessageKind = "message" | "reply" | "progress";
+export type MessageStatus = "queued" | "delivered" | "working" | "replied" | "failed" | "posted";
+
+export interface Thread {
+  id: string;
+  ref: string;
+  title: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Message {
+  id: string;
+  thread_id: string;
+  thread_ref: string;
+  direction: MessageDirection;
+  kind: MessageKind;
+  text: string;
+  reply_to: string | null;
+  status: MessageStatus;
+  status_reason: string | null;
+  created_at: string;
+  delivered_at: string | null;
+  working_at: string | null;
+  replied_at: string | null;
+}
 
 /** One inbox entry. The same envelope is POSTed to webhooks and MCP event subscriptions. */
 export interface HubEvent {

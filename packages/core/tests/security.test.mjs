@@ -3,6 +3,7 @@ import { randomBytes } from "node:crypto";
 import test from "node:test";
 import {
   AggregatorError,
+  cleanData,
   cleanText,
   createAesGcmSecretBox,
   decodeCursor,
@@ -15,6 +16,7 @@ import {
   normalizeClaimCode,
   parseAuthorizeRequest,
   pkceChallengeS256,
+  rateBucket,
   resolvePublicDestination,
   signWebhook,
   validateClientMetadataDocument,
@@ -85,6 +87,18 @@ test("text normalization strips control and bidi characters", () => {
   assert.throws(() => cleanText("abcd", "x", 3), AggregatorError);
 });
 
+test("Unicode line and paragraph separators and NEL become newlines before any other normalization", () => {
+  for (const separator of ["\u2028", "\u2029", "\u0085"]) {
+    const name = `U+${separator.codePointAt(0).toString(16).toUpperCase().padStart(4, "0")}`;
+    assert.equal(cleanText(`a${separator}b`, "f", 100), "a\nb", `${name} in multiline text`);
+    assert.equal(cleanText(`a${separator}b`, "f", 100, { multiline: false }), "a b", `${name} in single-line text`);
+    assert.deepEqual(cleanData({ note: `a${separator}b`, nested: [`c${separator}d`] }), { note: "a\nb", nested: ["c\nd"] }, `${name} in JSON data`);
+  }
+  assert.equal(cleanText("a\u2028\u2029b", "f", 100, { multiline: false }), "a b", "a run of breaks is one space");
+  assert.equal(cleanText("one\u2028IGNORE\u0085two", "f", 100).split("\n").length, 3, "line-based filters see every line");
+  assert.equal(cleanText("\u2028\u2029", "f", 100), null, "separators alone are empty text");
+});
+
 test("OAuth: PKCE, authorize validation, CIMD, DCR, challenges", () => {
   const verifier = randomBytes(32).toString("base64url");
   const challenge = pkceChallengeS256(verifier);
@@ -110,4 +124,23 @@ test("OAuth: PKCE, authorize validation, CIMD, DCR, challenges", () => {
   assert.equal(validateRegistrationRequest({ redirect_uris: ["https://ok.example/cb"], token_endpoint_auth_method: "client_secret_basic" }).ok, false);
   assert.equal(validateRegistrationRequest({ redirect_uris: ["https://ok.example/cb"], client_name: "App" }).ok, true);
   assert.match(wwwAuthenticate({ resourceMetadataUrl: "https://x/.well-known/oauth-protected-resource", scope: ["hub:read"], error: "insufficient_scope" }), /^Bearer resource_metadata="[^"]+", scope="hub:read", error="insufficient_scope"$/);
+});
+
+test("rate buckets: a REST route and its MCP tool spend the same budget", () => {
+  const pairs = [
+    ["me", "whoami", "read"],
+    ["inbox.read", "check_inbox", "read"],
+    ["messages.check", "check_messages", "read"],
+    ["messages.post", "post_message", "write"],
+    ["messages.ack", "acknowledge_message", "write"],
+    ["questions.create", "create_question", "question"],
+    ["jobs.create", "handoff_goal", "handoff"],
+    ["checkpoints.create", "post_checkpoint", "write"],
+    ["jobs.get", "get_job", "read"],
+  ];
+  for (const [rest, tool, bucket] of pairs) {
+    assert.equal(rateBucket(rest), bucket, rest);
+    assert.equal(rateBucket(tool), bucket, tool);
+  }
+  assert.equal(rateBucket("messages.anything"), "write", "only exact read names are reads");
 });
