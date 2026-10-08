@@ -1,0 +1,41 @@
+name: Contract change
+description: Propose a change to REST routes, MCP tools, events, error codes, limits or CLI exit codes.
+labels: [contract]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Read "Proposing contract changes" in CONTRIBUTING.md first. Additive changes are preferred;
+        breaking changes need a migration path for agents that are already connected.
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Motivation
+      description: Which agents or owners need this, and why the current contract cannot do it.
+    validations:
+      required: true
+  - type: textarea
+    id: wire
+    attributes:
+      label: Wire change
+      description: Exact before/after for each affected route, tool (name, arguments, annotations, scopes), event payload, error code or exit code.
+      render: markdown
+    validations:
+      required: true
+  - type: dropdown
+    id: compatibility
+    attributes:
+      label: Compatibility
+      options:
+        - Additive (new optional field, tool, event or route)
+        - Behavior change for existing callers
+        - Breaking (removal or renaming)
+    validations:
+      required: true
+  - type: textarea
+    id: security
+    attributes:
+      label: Security review
+      description: Answer the security review checklist in CONTRIBUTING.md for this change.
+    validations:
+      required: true

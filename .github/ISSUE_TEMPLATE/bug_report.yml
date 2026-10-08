@@ -1,0 +1,59 @@
+name: Bug report
+description: Something does not work as documented.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Security issues do not belong here.** Report vulnerabilities privately as described in SECURITY.md
+        (Security tab → "Report a vulnerability"). Never paste credentials, setup codes, signing secrets,
+        encryption keys or connection strings into an issue; replace them with `<redacted>`.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: The command or request, what you expected, and what you got (exit code, HTTP status, error JSON).
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Exact commands from a clean clone if possible. A failing `npm run demo` row or test name is ideal.
+      render: shell
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - core (service, schema, MCP, REST, OAuth helpers)
+        - reference server (agg-server)
+        - owner CLI (agg-owner)
+        - agent CLI (agg)
+        - poll-inbox.sh / install-poller.sh
+        - examples / demo
+        - docs / playbooks
+    validations:
+      required: true
+  - type: dropdown
+    id: storage
+    attributes:
+      label: Storage
+      options: [SQLite, Postgres (self-hosted), Supabase, Other managed Postgres, Not relevant]
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: Output of `node --version`, `npx agg-server --version`, and the PostgreSQL version if relevant.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Server log lines (redacted)
+      description: Server logs contain no credentials by design; still check before pasting.
+      render: text
