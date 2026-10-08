@@ -756,7 +756,8 @@ export class AggregatorService {
   }
 
   async acknowledgeAnswer(p: AgentPrincipal, id: string, revisionInput?: unknown): Promise<Question> {
-    this.requireScope(p, SCOPES.read, SCOPES.ask);
+    // Acknowledging changes state, so a read-only credential cannot do it.
+    this.requireScope(p, SCOPES.ask);
     const key = requiredId(id, "id");
     const revision = revisionInput === undefined || revisionInput === null ? null : cleanInteger(revisionInput, "revision", { min: 1, max: 1_000_000_000 });
     return await this.scoped(this.agentScope(p), async (db) => {

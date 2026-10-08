@@ -159,14 +159,14 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     description: "Use this after you have acted on an answer so it is not delivered again. Pass the revision you received.",
     inputSchema: { type: "object", properties: { question_id: idProp("Question id"), revision: { type: "integer", minimum: 1 } }, required: ["question_id"], additionalProperties: false },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-    scopes: [SCOPES.read, SCOPES.ask],
+    scopes: [SCOPES.ask],
   },
   {
     name: "cancel_question",
     title: "Withdraw a question",
     description: "Use this when a question no longer needs an answer.",
     inputSchema: { type: "object", properties: { question_id: idProp("Question id") }, required: ["question_id"], additionalProperties: false },
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
     scopes: [SCOPES.ask],
   },
   {
@@ -228,7 +228,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
       required: ["url"],
       additionalProperties: false,
     },
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     scopes: [SCOPES.read],
   },
   {
