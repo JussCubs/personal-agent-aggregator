@@ -1,0 +1,26 @@
+{
+  "name": "@agent-aggregator/agent-cli",
+  "version": "0.1.0",
+  "description": "agg: the deterministic agent-side CLI for the personal agent aggregator. Setup with a one-time code, report work, ask the owner, poll the inbox from cron, acknowledge answers.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": {
+    "agg": "./bin/agg.js"
+  },
+  "files": [
+    "bin",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node --test tests/*.test.mjs"
+  },
+  "dependencies": {
+    "@agent-aggregator/core": "0.1.0"
+  }
+}
