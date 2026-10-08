@@ -266,3 +266,72 @@ test("logs never contain credentials, codes, request bodies or authorization hea
   for (const line of ctx.logs) assert.doesNotThrow(() => JSON.parse(line), "every log line is JSON");
   assert.ok(ctx.logs.some((line) => JSON.parse(line).path === "/api/v1/inbox"), "paths are logged without the query string");
 });
+
+test("conversations: owner routes, agent REST round trip, logged hooks without text, host hooks", async (t) => {
+  const posted = [];
+  const statuses = [];
+  const ctx = await startServer({}, { hooks: { messagePosted: ({ message }) => posted.push(message.text), messageStatusChanged: ({ message }) => statuses.push(message.status) } });
+  t.after(() => ctx.close());
+  const { id, token } = await agentConnection(ctx);
+  const agent = (method, path, body) => request(ctx.url, method, `/api/v1${path}`, { token, body });
+  const secretText = "Rebook the 9:05 TEXT-MARKER-91c2";
+
+  const sent = await ctx.ownerApi("POST", `/owner/connections/${id}/messages`, { text: secretText, thread_ref: "conv-1", thread_title: "Travel", idempotency_key: "host-msg-1" });
+  assert.equal(sent.status, 201);
+  assert.equal(sent.json.message.status, "queued");
+  assert.equal(sent.json.thread.ref, "conv-1");
+  const retried = await ctx.ownerApi("POST", `/owner/connections/${id}/messages`, { text: secretText, thread_ref: "conv-1", idempotency_key: "host-msg-1" });
+  assert.equal(retried.status, 200, "a known idempotency_key is not sent twice");
+  assert.equal(retried.json.message.id, sent.json.message.id);
+  assert.equal((await ctx.ownerApi("POST", `/owner/connections/${id}/messages`, { text: "" })).status, 400);
+
+  const open = await agent("GET", "/messages");
+  assert.equal(open.status, 200);
+  assert.deepEqual(open.json.messages.map((m) => [m.id, m.status, m.text]), [[sent.json.message.id, "delivered", secretText]]);
+  assert.equal((await agent("POST", `/messages/${sent.json.message.id}/ack`, {})).json.message.status, "working");
+  const cp = await agent("POST", "/checkpoints", { id: "cp-rebook", summary: "Checked CHECKPOINT-MARKER-55 fares" });
+  assert.equal(cp.status, 201);
+  const reply = await agent("POST", "/messages", { id: "reply-1", reply_to: sent.json.message.id, text: "Rebooked on the 11:40" });
+  assert.equal(reply.status, 201);
+  assert.equal(reply.json.thread.ref, "conv-1");
+  assert.equal((await agent("POST", "/messages", { id: "reply-1", reply_to: sent.json.message.id, text: "Rebooked on the 11:40" })).status, 200);
+
+  const thread = await ctx.ownerApi("GET", `/owner/connections/${id}/messages?thread_ref=conv-1`);
+  assert.equal(thread.status, 200);
+  assert.deepEqual(thread.json.messages.map((m) => `${m.direction}:${m.status}`), ["to_agent:replied", "from_agent:posted"]);
+  assert.equal(thread.json.messages[1].reply_to, sent.json.message.id);
+  assert.deepEqual((await ctx.ownerApi("GET", `/owner/connections/${id}/messages?thread_ref=nothing-here`)).json.messages, []);
+  assert.deepEqual(posted, ["Rebooked on the 11:40"], "host hooks receive the agent's words");
+  assert.deepEqual(statuses, ["delivered", "working", "replied"]);
+
+  // Revoking fails the open message loudly.
+  const second = await ctx.ownerApi("POST", `/owner/connections/${id}/messages`, { text: "Anything else?", thread_ref: "conv-1" });
+  await ctx.ownerApi("POST", `/owner/connections/${id}/revoke`, {});
+  const after = await ctx.ownerApi("GET", `/owner/connections/${id}/messages?thread_ref=conv-1`);
+  const failed = after.json.messages.find((m) => m.id === second.json.message.id);
+  assert.deepEqual([failed.status, failed.status_reason], ["failed", "connection_revoked"]);
+  assert.equal((await ctx.ownerApi("POST", `/owner/connections/${id}/messages`, { text: "hello?" })).status, 409, "a revoked agent takes no messages");
+
+  const entries = ctx.logs.map((line) => JSON.parse(line));
+  assert.deepEqual(entries.filter((e) => e.msg === "message_status").map((e) => e.status), ["delivered", "working", "replied"]);
+  const postedLog = entries.find((e) => e.msg === "message_posted");
+  assert.deepEqual([postedLog.kind, postedLog.reply_to, postedLog.length, postedLog.connection_id], ["reply", sent.json.message.id, "Rebooked on the 11:40".length, id]);
+  const failure = entries.find((e) => e.msg === "message_failed");
+  assert.deepEqual([failure.level, failure.reason, failure.message_id], ["warn", "connection_revoked", second.json.message.id]);
+  const checkpoint = entries.find((e) => e.msg === "checkpoint_posted");
+  assert.deepEqual([checkpoint.checkpoint_id, checkpoint.connection_id], ["cp-rebook", id]);
+  const all = ctx.logs.join("");
+  for (const text of ["TEXT-MARKER-91c2", "Rebooked on the 11:40", "CHECKPOINT-MARKER-55", "Anything else?"]) assert.ok(!all.includes(text), `logs must not contain message or checkpoint text (${text})`);
+});
+
+test("conversations need the hub:chat scope on the connection", async (t) => {
+  const ctx = await startServer();
+  t.after(() => ctx.close());
+  const { id, token } = await agentConnection(ctx, "cli_poll", { scopes: ["hub:read", "hub:ask"] });
+  const refused = await ctx.ownerApi("POST", `/owner/connections/${id}/messages`, { text: "hi" });
+  assert.equal(refused.status, 409);
+  assert.equal(refused.json.error.code, "conflict");
+  const denied = await request(ctx.url, "GET", "/api/v1/messages", { token });
+  assert.equal(denied.status, 403);
+  assert.equal(denied.json.error.code, "insufficient_scope");
+});

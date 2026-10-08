@@ -1,4 +1,4 @@
-export { createAggregatorServer, type AggregatorServer, type CreateServerOptions } from "./app.js";
+export { createAggregatorServer, serverHooks, type AggregatorServer, type CreateServerOptions } from "./app.js";
 export { ConfigError, DEFAULT_HOST, DEFAULT_PORT, DEFAULT_SQLITE_PATH, describeConfig, loadConfig, loadStorageConfig, normalizePublicUrl, type ServerConfig, type StorageConfig } from "./config.js";
 export { PRODUCT_NAME, SERVER_NAME, SERVER_VERSION } from "./context.js";
 export { runDoctor, type DoctorCheck } from "./doctor.js";

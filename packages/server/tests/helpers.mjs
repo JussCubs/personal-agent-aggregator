@@ -18,7 +18,7 @@ export async function startServer(extraEnv = {}, opts = {}) {
   };
   const logs = [];
   const logger = createJsonLogger((line) => logs.push(line));
-  const server = await createAggregatorServer(loadConfig(env), { logger, worker: opts.worker ?? { deliverEveryMs: 100, sweepEveryMs: 60_000 } });
+  const server = await createAggregatorServer(loadConfig(env), { logger, worker: opts.worker ?? { deliverEveryMs: 100, sweepEveryMs: 60_000 }, ...(opts.hooks ? { hooks: opts.hooks } : {}), ...(opts.now ? { now: opts.now } : {}) });
   const url = await server.listen();
   const owner = await createOwner(server.storage.driver, "Test owner");
   const ownerApi = (method, path, body) => request(url, method, path, { token: owner.credential, body });

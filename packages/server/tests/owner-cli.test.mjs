@@ -86,3 +86,45 @@ test("agg-owner against a live server: connect, answer, decide, conflicts", asyn
   const bad = cli({ AGG_OWNER_URL: ctx.url, AGG_OWNER_TOKEN: `aggown_${randomBytes(32).toString("base64url")}` });
   assert.equal(await bad.run("whoami"), OWNER_EXIT.auth);
 });
+
+test("agg-owner say and thread: message an agent, follow the thread, exit codes", async (t) => {
+  const ctx = await startServer();
+  t.after(() => ctx.close());
+  const c = cli({ AGG_OWNER_URL: ctx.url, AGG_OWNER_TOKEN: ctx.owner.credential, XDG_CONFIG_HOME: mkdtempSync(join(tmpdir(), "agg-owner-cfg-")) });
+  assert.equal(await c.run("connection", "create", "--provider", "shell_agent", "--name", "Shell agent", "--mode", "cli_poll"), OWNER_EXIT.ok);
+  const connection = c.json().connection;
+  assert.equal(await c.run("credential", "issue", "--connection", connection.id), OWNER_EXIT.ok);
+  const token = c.json().token;
+  const api = (method, path, body) => fetch(`${ctx.url}/api/v1${path}`, { method, headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: body && JSON.stringify(body) }).then((r) => r.json());
+
+  assert.equal(await c.run("thread", connection.id, "trip"), OWNER_EXIT.empty, "an empty thread exits 3");
+  assert.equal(await c.run("say", connection.id, "Find a hotel near the venue", "--thread", "trip", "--title", "Trip", "--key", "host-1"), OWNER_EXIT.ok);
+  const sent = c.json();
+  assert.equal(sent.created, true);
+  assert.deepEqual([sent.message.status, sent.thread.ref, sent.thread.title], ["queued", "trip", "Trip"]);
+  assert.equal(await c.run("say", "--connection", connection.id, "--text", "Find a hotel near the venue", "--thread", "trip", "--key", "host-1"), OWNER_EXIT.ok);
+  assert.equal(c.json().created, false, "--key makes a retried say safe");
+  assert.equal(await c.run("thread", connection.id, "trip", "--wait", "1", "--interval", "1"), OWNER_EXIT.empty, "--wait exits 3 while the agent has not answered");
+
+  const { messages } = await api("GET", "/messages");
+  await api("POST", "/messages", { reply_to: messages[0].id, text: "Booked the Lakeside, 2 nights" });
+  assert.equal(await c.run("thread", "--connection", connection.id, "--thread", "trip", "--wait", "5"), OWNER_EXIT.ok);
+  assert.deepEqual(c.json().messages.map((m) => [m.direction, m.status, m.text]), [
+    ["to_agent", "replied", "Find a hotel near the venue"],
+    ["from_agent", "posted", "Booked the Lakeside, 2 nights"],
+  ]);
+  assert.equal(await c.run("say", connection.id, "Default thread works too"), OWNER_EXIT.ok);
+  assert.equal(c.json().thread.ref, "default");
+  assert.equal(await c.run("thread", connection.id), OWNER_EXIT.ok);
+  assert.equal(c.json().messages.length, 1);
+
+  assert.equal(await c.run("say", connection.id), OWNER_EXIT.usage, "say needs text");
+  assert.equal(await c.run("say", connection.id, "two", "texts"), OWNER_EXIT.usage, "unquoted text is refused");
+  assert.equal(await c.run("say", connection.id, "x", "--connection", connection.id), OWNER_EXIT.usage, "connection given twice");
+  assert.equal(await c.run("thread", connection.id, "trip", "--thread", "trip"), OWNER_EXIT.usage);
+
+  assert.equal(await c.run("connection", "create", "--provider", "narrow_agent", "--name", "Narrow", "--mode", "cli_poll", "--scope", "hub:read"), OWNER_EXIT.ok);
+  const narrow = c.json().connection;
+  await c.run("credential", "issue", "--connection", narrow.id);
+  assert.equal(await c.run("say", narrow.id, "hi"), OWNER_EXIT.conflict, "a connection without hub:chat exits 5");
+});

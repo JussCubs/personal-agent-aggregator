@@ -12,8 +12,9 @@ import { openStorage, type Storage } from "./storage.js";
  * stdout per command (setup-prompt prints Markdown), errors as JSON on
  * stderr, documented exit codes — so scripts and tests can drive it.
  *
- * Exit codes: 0 ok · 1 error · 2 usage · 3 empty list · 4 owner credential missing/invalid ·
- * 5 conflict (the question/job changed state or revision; read it again).
+ * Exit codes: 0 ok · 1 error · 2 usage · 3 empty list (or, for thread --wait, a message still
+ * open at the deadline) · 4 owner credential missing/invalid · 5 conflict (the question/job changed
+ * state or revision, or the connection cannot take messages; read it again).
  */
 export const OWNER_EXIT = { ok: 0, error: 1, usage: 2, empty: 3, auth: 4, conflict: 5 } as const;
 
@@ -50,10 +51,13 @@ Owner API (uses AGG_OWNER_URL + AGG_OWNER_TOKEN, or the file written by --save)
   job progress --connection ID --id JID --status running|blocked|needs_user|done|failed [--summary TEXT] [--reason CODE] [--result JSON]
   items [--connection ID] [--kind task|goal|project|state] [--limit N]
   checkpoints [--connection ID] [--item ID] [--limit N]
+  say CONNECTION TEXT [--thread REF] [--title TITLE] [--key KEY]   Message the agent (or --connection ID --text TEXT); thread REF defaults to "default"
+  thread CONNECTION [REF] [--limit N] [--wait SECONDS] [--interval SECONDS]   One thread, oldest first, with statuses. Exit 3 when empty, or with
+                                                      --wait when a message to the agent is still queued, delivered or working at the deadline
   audit [--connection ID] [--limit N]
   webhook set --connection ID --url URL [--header NAME --value VALUE] | webhook clear --connection ID
 
-Exit codes: 0 ok, 1 error, 2 usage, 3 empty list, 4 owner credential missing or invalid, 5 conflict (re-read and retry).
+Exit codes: 0 ok, 1 error, 2 usage, 3 empty list (thread --wait: still open), 4 owner credential missing or invalid, 5 conflict (re-read and retry).
 `;
 
 class UsageError extends Error {}
@@ -103,6 +107,16 @@ function defaultServer(env: Record<string, string | undefined>): string {
 function need<T>(value: T | undefined, message: string): T {
   if (value === undefined || value === null || value === "") throw new UsageError(message);
   return value;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** One positional argument or its flag, not both and not neither. */
+function oneOf(flag: string | undefined, positional: string | undefined, name: string): string {
+  if (flag !== undefined && positional !== undefined) throw new UsageError(`pass ${name} once, as an argument or as --${name}`);
+  return need(flag ?? positional, `${name} is required`);
 }
 
 function integer(value: string | undefined, name: string): number | undefined {
@@ -354,6 +368,51 @@ export async function runOwnerCli(argv: readonly string[], io: OwnerCliIo): Prom
       case "checkpoints": {
         const { values } = parseArgs({ args: [...rest], options: { connection: { type: "string" }, item: { type: "string" }, limit: { type: "string" } }, strict: true });
         return listResult((await api("GET", "/owner/checkpoints", undefined, { connection_id: values.connection, work_item_id: values.item, limit: integer(values.limit, "limit") })).json, "checkpoints");
+      }
+      case "say": {
+        const { values, positionals } = parseArgs({
+          args: [...rest],
+          options: { connection: { type: "string" }, text: { type: "string" }, thread: { type: "string" }, title: { type: "string" }, key: { type: "string" } },
+          allowPositionals: true,
+          strict: true,
+        });
+        if (positionals.length > 2) throw new UsageError("say takes CONNECTION and TEXT; quote the text");
+        const connectionId = oneOf(values.connection, positionals[0], "connection");
+        const text = oneOf(values.text, positionals[1], "text");
+        const body = {
+          text,
+          ...(values.thread !== undefined ? { thread_ref: values.thread } : {}),
+          ...(values.title !== undefined ? { thread_title: values.title } : {}),
+          ...(values.key !== undefined ? { idempotency_key: values.key } : {}),
+        };
+        out((await api("POST", `${conn(connectionId)}/messages`, body)).json);
+        return OWNER_EXIT.ok;
+      }
+      case "thread": {
+        const { values, positionals } = parseArgs({
+          args: [...rest],
+          options: { connection: { type: "string" }, thread: { type: "string" }, limit: { type: "string" }, wait: { type: "string" }, interval: { type: "string" } },
+          allowPositionals: true,
+          strict: true,
+        });
+        if (positionals.length > 2) throw new UsageError("thread takes CONNECTION and an optional REF");
+        const connectionId = oneOf(values.connection, positionals[0], "connection");
+        if (values.thread !== undefined && positionals[1] !== undefined) throw new UsageError("pass thread once, as an argument or as --thread");
+        const ref = values.thread ?? positionals[1];
+        const limit = integer(values.limit, "limit");
+        const wait = integer(values.wait, "wait") ?? 0;
+        const interval = Math.max(1, integer(values.interval, "interval") ?? 2) * 1000;
+        const deadline = Date.now() + wait * 1000;
+        for (;;) {
+          const page = (await api("GET", `${conn(connectionId)}/messages`, undefined, { thread_ref: ref, limit })).json as { messages: Array<{ direction: string; status: string }> };
+          const open = page.messages.some((m) => m.direction === "to_agent" && ["queued", "delivered", "working"].includes(m.status));
+          if (!open || wait === 0 || Date.now() + interval > deadline) {
+            out(page);
+            if (page.messages.length === 0) return OWNER_EXIT.empty;
+            return open && wait > 0 ? OWNER_EXIT.empty : OWNER_EXIT.ok;
+          }
+          await sleep(interval);
+        }
       }
       case "audit": {
         const { values } = parseArgs({ args: [...rest], options: { connection: { type: "string" }, limit: { type: "string" } }, strict: true });

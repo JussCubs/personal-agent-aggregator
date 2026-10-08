@@ -7,6 +7,7 @@ import {
   CONTRACT_VERSION,
   createAesGcmSecretBox,
   type AggregatorServiceOptions,
+  type ServiceHooks,
 } from "@agent-aggregator/core";
 import { handleMcp, handleRest } from "./agent-routes.js";
 import type { ServerConfig } from "./config.js";
@@ -36,6 +37,13 @@ export interface CreateServerOptions {
   /** Delivery loop timing; false disables the loop (tests drive deliverDue() themselves). */
   worker?: WorkerOptions | false;
   now?: () => Date;
+  /**
+   * Service hooks for a host embedding the server, for example to render an
+   * agent's reply in its own conversation UI. Each runs after the server's own
+   * logging for that hook; a hook that throws is logged as hook_error and never
+   * fails the request that triggered it.
+   */
+  hooks?: ServiceHooks;
 }
 
 export interface AggregatorServer {
@@ -50,6 +58,44 @@ export interface AggregatorServer {
 }
 
 type RouteLabel = string;
+
+/**
+ * The server's own hooks: the worker is kicked when deliveries are queued, and
+ * conversation and checkpoint activity is logged for the owner (ids, kinds,
+ * statuses and lengths only, never message or checkpoint text). A message that
+ * fails (not picked up, no reply, connection revoked) is logged as a warning so
+ * it is never silent. Host hooks run after these.
+ */
+export function serverHooks(logger: Logger, extra: ServiceHooks, kick: () => void): ServiceHooks {
+  return {
+    ...extra,
+    deliveriesQueued: async (event) => {
+      kick();
+      await extra.deliveriesQueued?.(event);
+    },
+    checkpointPosted: async (event) => {
+      logger.info("checkpoint_posted", { connection_id: event.connection.id, checkpoint_id: event.checkpoint.id, work_item_id: event.checkpoint.work_item_id });
+      await extra.checkpointPosted?.(event);
+    },
+    messagePosted: async (event) => {
+      logger.info("message_posted", {
+        connection_id: event.connection.id, thread_id: event.thread.id, message_id: event.message.id, kind: event.message.kind,
+        reply_to: event.message.reply_to, length: event.message.text.length,
+      });
+      await extra.messagePosted?.(event);
+    },
+    messageStatusChanged: async (event) => {
+      const fields = { connection_id: event.connection.id, thread_id: event.thread.id, message_id: event.message.id, status: event.message.status, reason: event.message.status_reason };
+      if (event.message.status === "failed") logger.warn("message_failed", fields);
+      else logger.info("message_status", fields);
+      await extra.messageStatusChanged?.(event);
+    },
+    hookError: (error, hook) => {
+      logger.error("hook_error", { hook, ...errorFields(error) });
+      extra.hookError?.(error, hook);
+    },
+  };
+}
 
 async function route(ctx: AppContext, req: IncomingMessage, res: ServerResponse, url: URL, ip: string): Promise<RouteLabel> {
   const path = url.pathname;
@@ -131,10 +177,7 @@ export async function createAggregatorServer(config: ServerConfig, opts: CreateS
     outbound: { allowPrivateNetwork: config.allowPrivateCallbacks },
     ...(opts.send ? { send: opts.send } : {}),
     ...(opts.now ? { now: opts.now } : {}),
-    hooks: {
-      deliveriesQueued: () => worker?.kick(),
-      hookError: (error, hook) => logger.error("hook_error", { hook, ...errorFields(error) }),
-    },
+    hooks: serverHooks(logger, opts.hooks ?? {}, () => worker?.kick()),
   });
   const limits = new Limits();
   const ctx: AppContext = {

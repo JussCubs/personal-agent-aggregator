@@ -386,6 +386,8 @@ error shape below.
 | `GET` | `/owner/connections/{connection_id}/jobs/{job_id}` | One job |
 | `POST` | `/owner/connections/{connection_id}/jobs/{job_id}/decision` | Approve or decline a job waiting for the owner {approve, note?} |
 | `POST` | `/owner/connections/{connection_id}/jobs/{job_id}/progress` | Report progress on an approved job {status, summary?, reason?, result?} |
+| `POST` | `/owner/connections/{connection_id}/messages` | Send the agent a message {text, thread_ref?, thread_title?, idempotency_key?}; 201 when new, 200 for a known idempotency_key |
+| `GET` | `/owner/connections/{connection_id}/messages` | One thread with statuses, oldest first ?thread_ref=&limit= (default thread "default", the latest 50) |
 | `GET` | `/owner/work-items` | Tasks, goals, projects and states across connections ?connection_id=&kind=&limit= |
 | `GET` | `/owner/checkpoints` | Checkpoints across connections ?connection_id=&work_item_id=&limit= |
 | `GET` | `/owner/audit` | Audit log ?connection_id=&limit= (max 200) |
@@ -651,10 +653,13 @@ Owner API (uses AGG_OWNER_URL + AGG_OWNER_TOKEN, or the file written by --save)
   job progress --connection ID --id JID --status running|blocked|needs_user|done|failed [--summary TEXT] [--reason CODE] [--result JSON]
   items [--connection ID] [--kind task|goal|project|state] [--limit N]
   checkpoints [--connection ID] [--item ID] [--limit N]
+  say CONNECTION TEXT [--thread REF] [--title TITLE] [--key KEY]   Message the agent (or --connection ID --text TEXT); thread REF defaults to "default"
+  thread CONNECTION [REF] [--limit N] [--wait SECONDS] [--interval SECONDS]   One thread, oldest first, with statuses. Exit 3 when empty, or with
+                                                      --wait when a message to the agent is still queued, delivered or working at the deadline
   audit [--connection ID] [--limit N]
   webhook set --connection ID --url URL [--header NAME --value VALUE] | webhook clear --connection ID
 
-Exit codes: 0 ok, 1 error, 2 usage, 3 empty list, 4 owner credential missing or invalid, 5 conflict (re-read and retry).
+Exit codes: 0 ok, 1 error, 2 usage, 3 empty list (thread --wait: still open), 4 owner credential missing or invalid, 5 conflict (re-read and retry).
 ```
 
 | Exit code | Name | Meaning |

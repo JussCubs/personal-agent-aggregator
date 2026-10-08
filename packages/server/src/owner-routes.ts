@@ -139,6 +139,17 @@ export const OWNER_ROUTES: readonly OwnerRoute[] = [
     handler: async (c, o, p, b) => ({ body: { job: await c.service.reportJobProgress(o, { ...b, connection_id: p.connection_id, job_id: p.job_id }) } }),
   },
   {
+    method: "POST", path: "/owner/connections/{connection_id}/messages", summary: "Send the agent a message {text, thread_ref?, thread_title?, idempotency_key?}; 201 when new, 200 for a known idempotency_key",
+    handler: async (c, o, p, b) => {
+      const out = await c.service.sendMessage(o, { ...b, connection_id: p.connection_id });
+      return { status: out.created ? 201 : 200, body: out };
+    },
+  },
+  {
+    method: "GET", path: "/owner/connections/{connection_id}/messages", summary: "One thread with statuses, oldest first ?thread_ref=&limit= (default thread \"default\", the latest 50)",
+    handler: async (c, o, p, _b, q) => ({ body: { messages: await c.service.listThreadMessages(o, { ...q, connection_id: p.connection_id }) } }),
+  },
+  {
     method: "GET", path: "/owner/work-items", summary: "Tasks, goals, projects and states across connections ?connection_id=&kind=&limit=",
     handler: async (c, o, _p, _b, q) => ({ body: { items: await c.service.listOwnerWorkItems(o, q) } }),
   },
