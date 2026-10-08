@@ -3,12 +3,13 @@
 // The "agent" is the `agg` CLI plus scripts/poll-inbox.sh, driven exactly as
 // a cron job would drive them. The credential arrives through a one-time
 // setup code the agent exchanges itself, so it never passes through a chat.
-// Every step is a command with a documented exit code. No language model is
-// called.
+// Every step is a command with a documented exit code, including answering
+// the owner's messages (agg messages / working / reply, agg ask --thread). No
+// language model is called.
 import { spawn } from "node:child_process";
 import { chmodSync, existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { ROOT, assertLogsClean, expect, expectEqual, isMain, runStandalone, startStack } from "../lib/harness.mjs";
+import { ROOT, assertConversationLogged, assertLogsClean, expect, expectEqual, isMain, ownerMessage, runStandalone, startStack } from "../lib/harness.mjs";
 
 export const NAME = "cli-poll";
 
@@ -127,6 +128,56 @@ export async function run(check) {
       expectEqual(done.json.status, "done", "job status");
     });
 
+    // Conversation bridge from a shell: the poller sees message.created and only then wakes the worker.
+    const ownerText = "Also check the spare drive's SMART status";
+    const message = await check.step("owner messages the agent (agg-owner say); agg inbox --exec gets message.created; reading it is the delivery receipt", async () => {
+      const res = await stack.owner(["say", connection.id, ownerText, "--thread", "conv-backup", "--key", "host-msg-3"]);
+      expectEqual(res.json.message.status, "queued", "queued until the agent reads it");
+      writeFileSync(eventsFile, "");
+      await stack.agg(["inbox", "--exec", `cat >> '${eventsFile}'`]);
+      const event = lines(readFileSync(eventsFile, "utf8")).find((e) => e.name === "message.created");
+      expect(event, "message.created handed to the hook");
+      expectEqual(event.data.text, ownerText, "text");
+      expectEqual(event.data.message_id, res.json.message.id, "message id");
+      expectEqual((await ownerMessage(stack, connection.id, "conv-backup", res.json.message.id)).status, "delivered", "owner's view");
+      return { id: res.json.message.id, threadId: res.json.thread.id };
+    });
+
+    await check.step("agg messages (exit 0, one JSON line) + agg working --id; the owner sees working", async () => {
+      const open = await stack.agg(["messages"]);
+      expectEqual(open.json.id, message.id, "open message");
+      expectEqual(open.json.text, ownerText, "text");
+      await stack.agg(["working", "--id", message.id]);
+      expectEqual((await ownerMessage(stack, connection.id, "conv-backup", message.id)).status, "working", "owner's view");
+    });
+
+    await check.step("agg ask --thread (exit 0); owner answers in that conversation; agg inbox gets answer.created; agg answer + ack", async () => {
+      const asked = await stack.agg(["ask", "--id", "q-backup-smart", "--prompt", "Drive 2 reports 3 reallocated sectors. Replace it now?", "--option", "now=Replace now", "--option", "later=Next month", "--item", "task-backup", "--thread", message.threadId]);
+      expectEqual(asked.json.question.thread_id, message.threadId, "question carries the thread");
+      const pending = await stack.owner(["questions", "--connection", connection.id]);
+      const entry = pending.json.questions.find((q) => q.question.id === "q-backup-smart");
+      expectEqual(entry.question.thread_id, message.threadId, "owner sees the thread");
+      await stack.owner(["answer", "--connection", connection.id, "--id", "q-backup-smart", "--revision", "1", "--choice", "now"]);
+      writeFileSync(eventsFile, "");
+      await stack.agg(["inbox", "--exec", `cat >> '${eventsFile}'`]);
+      expect(lines(readFileSync(eventsFile, "utf8")).some((e) => e.name === "answer.created" && e.data.question_id === "q-backup-smart"), "answer.created delivered to the hook");
+      const answer = await stack.agg(["answer", "--id", "q-backup-smart"]);
+      expectEqual(answer.json.answer.choice, "now", "choice");
+      await stack.agg(["ack", "--id", "q-backup-smart", "--revision", String(answer.json.revision)]);
+    });
+
+    const replyText = "Drive 2 replaced; SMART is clean on the spare.";
+    await check.step("agg reply --to (exit 0); agg messages has nothing open (exit 3); the owner's thread shows replied", async () => {
+      const reply = await stack.agg(["reply", "--to", message.id, "--text", replyText, "--id", "reply-backup-smart"]);
+      expectEqual(reply.json.created, true, "created");
+      await stack.agg(["messages"], 3);
+      const thread = await stack.owner(["thread", connection.id, "conv-backup"]);
+      expectEqual(thread.json.messages.map((m) => `${m.direction}:${m.status}`).join(","), "to_agent:replied,from_agent:posted", "thread");
+      expectEqual(thread.json.messages[1].text, replyText, "the agent's words");
+    });
+
+    await check.step("server logged delivered → working → replied, never the text", async () => assertConversationLogged(stack, message.id, ["delivered", "working", "replied"], [ownerText, replyText]));
+
     await check.step("pollers install idempotently: agg install-poller --print, scripts/install-poller.sh twice → one entry", async () => {
       const printed = await stack.agg(["install-poller", "--print", "--exec", "wake-my-worker"]);
       expect(printed.stdout.includes("# agent-aggregator-poller"), "agg prints a marked crontab line");
@@ -146,8 +197,12 @@ export async function run(check) {
       expect(existsSync(join(ROOT, "scripts/poll-inbox.sh")), "poller script present");
     });
 
-    await check.step("owner revokes the connection; agg doctor exits 4", async () => {
+    await check.step("owner revokes the connection: an unanswered message fails visibly (connection_revoked); agg doctor exits 4", async () => {
+      const pending = await stack.owner(["say", connection.id, "One more thing before you go", "--thread", "conv-backup"]);
       await stack.owner(["connection", "revoke", "--id", connection.id]);
+      const lost = await ownerMessage(stack, connection.id, "conv-backup", pending.json.message.id);
+      expectEqual(`${lost.status}:${lost.status_reason}`, "failed:connection_revoked", "status");
+      await stack.owner(["say", connection.id, "Are you there?"], 5);
       await stack.agg(["doctor"], 4);
     });
 

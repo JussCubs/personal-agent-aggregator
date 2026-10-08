@@ -153,6 +153,45 @@ export async function startStack(name) {
   };
 }
 
+/** Polls `fn` until it returns a truthy value (returned) or the timeout passes. */
+export async function eventually(fn, what, timeoutMs = 10_000, intervalMs = 200) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const value = await fn();
+    if (value) return value;
+    if (Date.now() > deadline) throw new Error(`timed out after ${timeoutMs} ms waiting for ${what}`);
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+}
+
+/** The owner's view of one thread (`agg-owner thread`): the message with this id, or undefined. */
+export async function ownerMessage(stack, connectionId, ref, messageId) {
+  const res = await stack.owner(["thread", connectionId, ref]);
+  return res.json.messages.find((m) => m.id === messageId);
+}
+
+/**
+ * Checks what the server logged about a conversation: the status changes of
+ * the owner's message, in order, and one message_posted line per agent post,
+ * and that none of the given texts appear anywhere in the logs.
+ */
+export function assertConversationLogged(stack, messageId, statuses, texts) {
+  const entries = stack.logs.flatMap((line) => {
+    try {
+      return [JSON.parse(line)];
+    } catch {
+      return [];
+    }
+  });
+  const seen = entries.filter((e) => (e.msg === "message_status" || e.msg === "message_failed") && e.message_id === messageId).map((e) => e.status);
+  expectEqual(seen.join(","), statuses.join(","), "logged status changes");
+  const posts = entries.filter((e) => e.msg === "message_posted" && e.reply_to === messageId);
+  expect(posts.length >= 1, "the agent's posts are logged");
+  const all = stack.logs.join("\n");
+  for (const text of texts) expect(!all.includes(text), `logs contain message text "${text.slice(0, 20)}"`);
+  return `${seen.length} status lines, ${posts.length} posts, no message text`;
+}
+
 /** Fails if the server's logs contain any of the given secrets. */
 export function assertLogsClean(stack, secrets) {
   const all = stack.logs.join("\n");

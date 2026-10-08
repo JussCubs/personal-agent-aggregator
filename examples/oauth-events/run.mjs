@@ -7,11 +7,12 @@
 // code + PKCE through the server's HTML consent page with the owner's
 // credential typed into the form, exchanges the code, subscribes to MCP
 // events (answering the signed verification challenge), and reacts to signed
-// event deliveries. No language model is called.
+// event deliveries, including a conversation round trip (message.created →
+// working → a question in the thread → reply). No language model is called.
 import { createHash, randomBytes } from "node:crypto";
 import { createServer } from "node:http";
 import { generateWebhookSecret } from "@agent-aggregator/core";
-import { assertLogsClean, expect, expectEqual, isMain, mcp, runStandalone, startReceiver, startStack, tool } from "../lib/harness.mjs";
+import { assertConversationLogged, assertLogsClean, eventually, expect, expectEqual, isMain, mcp, ownerMessage, runStandalone, startReceiver, startStack, tool } from "../lib/harness.mjs";
 
 export const NAME = "oauth-events";
 
@@ -93,11 +94,11 @@ export async function run(check) {
 
     const tokens = await check.step("authorization code + PKCE via the consent page (owner credential typed into the form)", async () =>
       authorize(url, metadata, {
-        clientId: client.client_id, redirectUri, scope: "hub:read hub:write hub:ask hub:handoff", ownerCredential: stack.ownerCredential,
+        clientId: client.client_id, redirectUri, scope: "hub:read hub:write hub:ask hub:handoff hub:chat", ownerCredential: stack.ownerCredential,
         expectPage: (html) => {
           expect(html.includes("Example events agent"), "page shows the client name");
           expect(html.includes("127.0.0.1:53682"), "page shows the redirect host");
-          for (const scope of ["hub:read", "hub:write", "hub:ask", "hub:handoff"]) expect(html.includes(`<code>${scope}</code>`), `page lists ${scope}`);
+          for (const scope of ["hub:read", "hub:write", "hub:ask", "hub:handoff", "hub:chat"]) expect(html.includes(`<code>${scope}</code>`), `page lists ${scope}`);
         },
       }),
     );
@@ -114,16 +115,16 @@ export async function run(check) {
     receiver = await startReceiver();
     const subscriptionSecret = generateWebhookSecret();
     receiver.state.secret = subscriptionSecret;
-    const subscriptions = await check.step("events/subscribe answer.created + job.updated; signed verification challenge answered", async () => {
+    const subscriptions = await check.step("events/subscribe answer.created + job.updated + message.created; signed verification challenges answered", async () => {
       const out = {};
-      for (const name of ["answer.created", "job.updated"]) {
+      for (const name of ["answer.created", "job.updated", "message.created"]) {
         const res = await mcp(url, tokens.access_token, "events/subscribe", { name, arguments: {}, delivery: { mode: "webhook", url: `${receiver.url}/mcp-events`, secret: subscriptionSecret } }, { modern: true });
         expect(res.json.result, `subscribe ${name}: ${JSON.stringify(res.json.error)}`);
         expect(/^sub_[0-9a-f]{32}$/.test(res.json.result.id), "subscription id");
         expect(res.json.result.refreshBefore, "refreshBefore");
         out[name] = res.json.result.id;
       }
-      expectEqual(receiver.state.verifications, 2, "verification challenges answered");
+      expectEqual(receiver.state.verifications, 3, "verification challenges answered");
       return out;
     });
 
@@ -170,6 +171,50 @@ export async function run(check) {
       const done = await receiver.waitFor((d) => d.json.name === "job.updated" && d.json.data.status === "done", "job.updated done");
       expectEqual(done.headers["x-mcp-subscription-id"], subscriptions["job.updated"], "subscription id header");
     });
+
+    // Conversation bridge over MCP Events: the owner writes from a conversation, the agent answers in it.
+    const ownerText = "Can we bring the dog to the lake lodge?";
+    const message = await check.step("owner messages the agent (agg-owner say); a signed message.created MCP event wakes it", async () => {
+      const res = await stack.owner(["say", connectionId, ownerText, "--thread", "conv-offsite", "--key", "host-msg-7"]);
+      const hit = await receiver.waitFor((d) => d.json.name === "message.created", "message.created event");
+      expectEqual(hit.headers["x-mcp-subscription-id"], subscriptions["message.created"], "subscription id header");
+      expectEqual(hit.json.data.text, ownerText, "text in the payload");
+      expectEqual(hit.json.data.thread_id, res.json.thread.id, "thread id");
+      await eventually(async () => (await ownerMessage(stack, connectionId, "conv-offsite", res.json.message.id))?.status === "delivered", "delivered receipt");
+      return { id: res.json.message.id, threadId: res.json.thread.id };
+    });
+
+    await check.step("agent: check_messages (thread filter) + acknowledge_message → working", async () => {
+      const open = await tool(url, tokens.access_token, "check_messages", { thread_id: message.threadId });
+      expectEqual(open.messages.map((m) => m.id).join(","), message.id, "the open message");
+      await tool(url, tokens.access_token, "acknowledge_message", { message_id: message.id });
+      expectEqual((await ownerMessage(stack, connectionId, "conv-offsite", message.id)).status, "working", "owner's view");
+    });
+
+    await check.step("agent asks in the thread (create_question thread_id); owner answers; answer.created event; get_answer", async () => {
+      await tool(url, tokens.access_token, "create_question", { id: "q-offsite-dog", prompt: "The lodge allows one dog for 40 USD. Add it?", options: [{ id: "add", label: "Add the dog" }, { id: "skip", label: "Leave it" }], thread_id: message.threadId, work_item_id: "goal-q4-trip" });
+      const pending = await stack.owner(["questions"]);
+      const entry = pending.json.questions.find((q) => q.question.id === "q-offsite-dog");
+      expectEqual(entry.question.thread_id, message.threadId, "owner sees the thread");
+      await stack.owner(["answer", "--connection", connectionId, "--id", "q-offsite-dog", "--revision", "1", "--choice", "add"]);
+      const hit = await receiver.waitFor((d) => d.json.name === "answer.created" && d.json.data.question_id === "q-offsite-dog", "answer.created");
+      expectEqual(hit.headers["x-mcp-subscription-id"], subscriptions["answer.created"], "subscription id header");
+      const q = await tool(url, tokens.access_token, "get_answer", { question_id: "q-offsite-dog" });
+      expectEqual(q.answer.choice, "add", "choice");
+      await tool(url, tokens.access_token, "acknowledge_answer", { question_id: "q-offsite-dog", revision: q.revision });
+    });
+
+    const replyText = "Yes: the dog is added to the booking (40 USD).";
+    await check.step("agent replies with post_message; owner thread --wait shows replied with the agent's words", async () => {
+      await tool(url, tokens.access_token, "post_message", { id: "reply-offsite-dog", reply_to: message.id, text: replyText });
+      const thread = await stack.owner(["thread", connectionId, "conv-offsite", "--wait", "5"]);
+      expectEqual(thread.json.messages.map((m) => `${m.direction}:${m.status}`).join(","), "to_agent:replied,from_agent:posted", "thread");
+      expectEqual(thread.json.messages[1].text, replyText, "reply text");
+    });
+
+    await check.step("server logged delivered → working → replied, never the text", async () =>
+      assertConversationLogged(stack, message.id, ["delivered", "working", "replied"], [ownerText, replyText]),
+    );
 
     const rotated = await check.step("refresh token rotates; reusing the old refresh token revokes the family", async () => {
       const refreshed = await get(metadata.token_endpoint, form({ grant_type: "refresh_token", refresh_token: tokens.refresh_token, client_id: client.client_id }));

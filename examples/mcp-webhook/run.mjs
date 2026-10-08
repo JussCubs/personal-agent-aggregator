@@ -4,15 +4,20 @@
 // credential the owner issued (both the legacy initialize handshake and the
 // 2026-07-28 server/discover flow), registers a wake-up webhook pointing at a
 // local receiver, and reacts to signed deliveries. The owner acts through
-// agg-owner. No language model is called.
+// agg-owner, including a conversation: the owner's message wakes the agent,
+// which marks it working, asks an approval in the same thread and replies.
+// No language model is called.
 import { createHash } from "node:crypto";
 import {
   actionDigest,
+  assertConversationLogged,
   assertLogsClean,
+  eventually,
   expect,
   expectEqual,
   isMain,
   mcp,
+  ownerMessage,
   runStandalone,
   startReceiver,
   startStack,
@@ -172,6 +177,64 @@ export async function run(check) {
       const got = await tool(url, token, "get_job", { job_id: job.id });
       expectEqual(got.status, "done", "get_job status");
     });
+
+    // Conversation bridge: the owner writes to the agent from a conversation (thread_ref is the host's conversation id).
+    const ownerText = "Pay invoice 43 too, same vendor";
+    const message = await check.step("owner messages the agent (agg-owner say --thread); a signed message.created webhook wakes it", async () => {
+      const res = await stack.owner(["say", connection.id, ownerText, "--thread", "conv-invoices", "--title", "Invoices", "--key", "host-msg-1"]);
+      expectEqual(res.json.message.status, "queued", "status before the wake");
+      const retry = await stack.owner(["say", connection.id, ownerText, "--thread", "conv-invoices", "--key", "host-msg-1"]);
+      expectEqual(retry.json.created, false, "a retried send with the same key is not sent twice");
+      const hit = await receiver.waitFor((d) => d.json.name === "message.created", "message.created");
+      expectEqual(hit.headers.authorization, `Bearer ${routineKey}`, "routine key header");
+      expectEqual(hit.json.data.message_id, res.json.message.id, "message id");
+      expectEqual(hit.json.data.text, ownerText, "text in the payload");
+      expectEqual(hit.json.data.thread_ref, "conv-invoices", "thread ref");
+      await eventually(async () => (await ownerMessage(stack, connection.id, "conv-invoices", res.json.message.id))?.status === "delivered", "delivered receipt");
+      return { id: res.json.message.id, threadId: res.json.thread.id };
+    });
+
+    await check.step("agent: check_messages, then acknowledge_message; the owner sees working", async () => {
+      const open = await tool(url, token, "check_messages", {});
+      expectEqual(open.messages.length, 1, "open messages");
+      expectEqual(open.messages[0].text, ownerText, "text");
+      const acked = await tool(url, token, "acknowledge_message", { message_id: message.id });
+      expectEqual(acked.message.status, "working", "status");
+      expectEqual((await ownerMessage(stack, connection.id, "conv-invoices", message.id)).status, "working", "owner's view");
+    });
+
+    const digest43 = actionDigest({ type: "payment", invoice: "43", amount: "98.50", currency: "USD" });
+    await check.step("agent asks an approval with thread_id; the owner sees it in that conversation and approves", async () => {
+      const asked = await tool(url, token, "create_question", { id: "q-invoice-43-pay", kind: "approval", prompt: "Pay invoice 43 for 98.50 USD?", affected_action: "Pay 98.50 USD to the vendor on invoice 43", action_digest: digest43, thread_id: message.threadId });
+      expectEqual(asked.question.thread_id, message.threadId, "question carries the thread");
+      const pending = await stack.owner(["questions"]);
+      const entry = pending.json.questions.find((q) => q.question.id === "q-invoice-43-pay");
+      expectEqual(entry.question.thread_id, message.threadId, "owner sees the thread");
+      await stack.owner(["answer", "--connection", connection.id, "--id", "q-invoice-43-pay", "--revision", "1", "--approve"]);
+      await receiver.waitFor((d) => d.json.name === "answer.created" && d.json.data.question_id === "q-invoice-43-pay", "answer.created for the in-thread approval");
+      const q = await tool(url, token, "get_answer", { question_id: "q-invoice-43-pay" });
+      expectEqual(q.answer.decision, "approved", "decision");
+      expectEqual(q.answer.action_digest, digest43, "digest");
+      await tool(url, token, "acknowledge_answer", { question_id: "q-invoice-43-pay", revision: 1 });
+    });
+
+    const replyText = "Paid invoice 43 (98.50 USD).";
+    await check.step("agent: post_message progress, then the reply (idempotent by id); the owner's thread shows replied", async () => {
+      await tool(url, token, "post_message", { reply_to: message.id, kind: "progress", text: "Approved; paying now" });
+      const reply = await tool(url, token, "post_message", { id: "reply-invoice-43", reply_to: message.id, text: replyText });
+      expectEqual(reply.created, true, "created");
+      expectEqual(reply.thread.ref, "conv-invoices", "same conversation");
+      const again = await tool(url, token, "post_message", { id: "reply-invoice-43", reply_to: message.id, text: replyText });
+      expectEqual(again.created, false, "retry is a no-op");
+      const thread = await stack.owner(["thread", connection.id, "conv-invoices", "--wait", "5"]);
+      expectEqual(thread.json.messages.map((m) => `${m.direction}:${m.kind}:${m.status}`).join(","), "to_agent:message:replied,from_agent:progress:posted,from_agent:reply:posted", "thread");
+      expectEqual(thread.json.messages.at(-1).text, replyText, "the agent's words, as the agent's message");
+      expectEqual((await tool(url, token, "check_messages", {})).messages.length, 0, "nothing left open");
+    });
+
+    await check.step("server logged queued → delivered → working → replied and both posts, never the text", async () =>
+      assertConversationLogged(stack, message.id, ["delivered", "working", "replied"], [ownerText, replyText, "Approved; paying now"]),
+    );
 
     await check.step("server logs contain no credentials, secrets or Authorization values", async () => assertLogsClean(stack, [token, stack.ownerCredential, receiver.state.secret, routineKey, stack.env.AGG_ENCRYPTION_KEY]));
   } finally {
