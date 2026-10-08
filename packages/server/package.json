@@ -1,0 +1,40 @@
+{
+  "name": "@agent-aggregator/server",
+  "version": "0.1.0",
+  "description": "Reference server for the personal agent aggregator: agent REST API, MCP endpoint, OAuth authorization server, owner API and signed-delivery worker on node:http.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "agg-server": "./bin/agg-server.js",
+    "agg-owner": "./bin/agg-owner.js"
+  },
+  "files": [
+    "bin",
+    "dist",
+    "src",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "engines": {
+    "node": ">=22.5"
+  },
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test --experimental-sqlite tests/*.test.mjs"
+  },
+  "dependencies": {
+    "@agent-aggregator/core": "0.1.0",
+    "postgres": "^3.4.7"
+  }
+}
