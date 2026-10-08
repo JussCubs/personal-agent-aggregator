@@ -677,7 +677,8 @@ export class AggregatorService {
     if (actionDigest !== null && !/^[A-Za-z0-9:_=+/.-]{1,128}$/.test(actionDigest)) throw invalid("action_digest must be 1-128 URL-safe characters", "action_digest");
     const urgency = cleanUrgency(raw.urgency);
     let expiresAt = cleanTimestamp(raw.expires_at, "expires_at");
-    if (!expiresAt && raw.expires_in_seconds !== undefined) {
+    const relativeExpiry = !expiresAt && raw.expires_in_seconds !== undefined && raw.expires_in_seconds !== null;
+    if (relativeExpiry) {
       expiresAt = addSeconds(this.now(), cleanInteger(raw.expires_in_seconds, "expires_in_seconds", { min: 60, max: 30 * 86_400 }));
     }
     if (expiresAt && (Date.parse(expiresAt) <= this.now().getTime() || Date.parse(expiresAt) > this.now().getTime() + 31 * 86_400_000)) {
@@ -690,6 +691,8 @@ export class AggregatorService {
       const now = this.now().toISOString();
       if (existingRows[0]) {
         const existing = this.toQuestion(existingRows[0]);
+        // A relative expiry is fixed when the question is first asked; re-sending it must not move the deadline.
+        if (relativeExpiry && existing.expires_at) content.expires_at = existing.expires_at;
         const existingContent = {
           kind: existing.kind, prompt: existing.prompt, details: existing.details, options: existing.options, allow_free_text: existing.allow_free_text,
           work_item_id: existing.work_item_id, affected_action: existing.affected_action, action_digest: existing.action_digest, urgency: existing.urgency, expires_at: existing.expires_at,
@@ -702,7 +705,7 @@ export class AggregatorService {
           `UPDATE ${this.t("questions")} SET kind = $3, prompt = $4, details = $5, options = $6::jsonb, allow_free_text = $7, work_item_id = $8,
              affected_action = $9, action_digest = $10, urgency = $11, expires_at = $12, revision = revision + 1, updated_at = $13
            WHERE connection_id = $1 AND id = $2 RETURNING *`,
-          [p.connectionId, id, kind, prompt, details, JSON.stringify(options), allowFreeText, workItemId, affectedAction, actionDigest, urgency, expiresAt, now],
+          [p.connectionId, id, kind, prompt, details, JSON.stringify(options), allowFreeText, workItemId, affectedAction, actionDigest, urgency, content.expires_at, now],
         );
         const question = this.toQuestion(rows[0]!);
         await this.audit(db, { ownerId: p.ownerId, connectionId: p.connectionId, actor: "agent", action: "question.revise", targetType: "question", targetId: id, detail: { revision: question.revision } });
@@ -1037,7 +1040,7 @@ export class AggregatorService {
         reason = "http_error";
       }
     } catch (error) {
-      reason = error instanceof AggregatorError && error.code === "unavailable" ? "timeout" : "unreachable";
+      reason = error instanceof AggregatorError && error.code === "unavailable" ? (error.details?.reason === "dns" ? "unreachable" : "timeout") : "unreachable";
     }
     if (!verified) throw new AggregatorError("invalid_request", "callback endpoint did not complete verification", { callback_error: true, reason });
 
@@ -1938,6 +1941,7 @@ export class AggregatorService {
       return { kind: "retry", status: response.status, error: `http_${response.status}` };
     } catch (error) {
       if (error instanceof AggregatorError && error.code === "invalid_request") return { kind: "final", error: "destination_rejected" };
+      if (error instanceof AggregatorError && error.details?.reason === "dns") return { kind: "retry", error: "dns" };
       return { kind: "retry", error: error instanceof AggregatorError && error.code === "unavailable" ? "timeout" : "network" };
     }
   }

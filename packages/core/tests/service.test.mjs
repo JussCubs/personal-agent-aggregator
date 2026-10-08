@@ -243,3 +243,32 @@ test("questions expire on sweep and notify the agent", async () => {
   assert.equal(inbox.events[0].name, "question.updated");
   assert.equal(inbox.events[0].data.status, "expired");
 });
+
+test("re-sending a question with a relative expiry is a no-op", async () => {
+  let now = new Date("2026-10-01T00:00:00Z");
+  const { service, owner } = await sqliteService({ now: () => now });
+  const alice = await owner("alice");
+  const { principal } = await connect(service, alice);
+  const first = await service.createQuestion(principal, { id: "q", prompt: "Ship?", options: ["yes"], expires_in_seconds: 3600 });
+  now = new Date(now.getTime() + 5000);
+  const retry = await service.createQuestion(principal, { id: "q", prompt: "Ship?", options: ["yes"], expires_in_seconds: 3600 });
+  assert.equal(retry.created, false);
+  assert.equal(retry.revised, false, "a retry does not revise the question");
+  assert.equal(retry.question.revision, first.question.revision);
+  assert.equal(retry.question.expires_at, first.question.expires_at, "the deadline set on first ask is kept");
+});
+
+test("a DNS failure is retried, not final", async () => {
+  const { service, owner } = await sqliteService({
+    send: async () => {
+      throw new AggregatorError("unavailable", "destination host did not resolve", { field: "url", reason: "dns" });
+    },
+  });
+  const alice = await owner("alice");
+  const { principal } = await connect(service, alice);
+  await service.setWebhook(principal, { url: "http://127.0.0.1:9/hook" });
+  await service.handoffJob(principal, { goal: "g" });
+  const result = await service.deliverDue();
+  assert.equal(result.retried, 1);
+  assert.equal(result.failed, 0);
+});

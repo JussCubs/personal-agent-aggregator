@@ -148,9 +148,10 @@ export async function resolvePublicDestination(url: URL, opts: UrlGuardOptions &
   try {
     answers = (await (opts.resolver ?? defaultResolver)(host)).slice(0, 32);
   } catch {
-    throw new AggregatorError("invalid_request", "destination host did not resolve", { field: "url" });
+    // Resolution failures are usually temporary; callers retry "unavailable".
+    throw new AggregatorError("unavailable", "destination host did not resolve", { field: "url", reason: "dns" });
   }
-  if (answers.length === 0) throw new AggregatorError("invalid_request", "destination host did not resolve", { field: "url" });
+  if (answers.length === 0) throw new AggregatorError("unavailable", "destination host did not resolve", { field: "url", reason: "dns" });
   if (!opts.allowPrivateNetwork && answers.some((answer) => !isPublicAddress(answer.address))) {
     throw new AggregatorError("invalid_request", "destination resolves to a private or reserved address", { field: "url" });
   }
