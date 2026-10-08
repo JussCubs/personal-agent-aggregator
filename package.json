@@ -1,0 +1,30 @@
+{
+  "name": "personal-agent-aggregator",
+  "private": true,
+  "version": "0.1.0",
+  "description": "The reference stack for aggregating personal AI agents: one safe, storage-agnostic tracker for tasks, goals, projects, checkpoints, questions and approvals, over MCP, a CLI and signed webhooks.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "workspaces": [
+    "packages/core",
+    "packages/server",
+    "packages/agent-cli"
+  ],
+  "engines": {
+    "node": ">=22.5"
+  },
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run build && npm run test --workspaces --if-present && node --test --experimental-sqlite tests/*.test.mjs",
+    "test:postgres": "node scripts/require-env.mjs AGG_TEST_DATABASE_URL && npm run build && node --test --experimental-sqlite packages/core/tests/rls-postgres.test.mjs packages/server/tests/postgres.test.mjs tests/verify-rls-sql.test.mjs && AGG_TEST_DRIVER=postgres npm run test --workspace @agent-aggregator/core",
+    "demo": "npm run build && node examples/run-demo.mjs",
+    "docs:contract": "node scripts/gen-contract-docs.mjs",
+    "pack:all": "npm pack --workspaces --pack-destination dist-packages"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "postgres": "^3.4.7",
+    "typescript": "^5.9.3"
+  }
+}

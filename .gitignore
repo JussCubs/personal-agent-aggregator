@@ -1,0 +1,27 @@
+# Dependencies and build output
+node_modules/
+dist/
+dist-packages/
+*.tsbuildinfo
+
+# Local data and secrets
+data/
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+.env
+.env.*
+!.env.example
+owner.json
+hub.json
+*.cursor
+*.lock
+
+# Tools and editors
+.scratch/
+.DS_Store
+.idea/
+.vscode/
+*.log
+coverage/
