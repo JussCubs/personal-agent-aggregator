@@ -23,7 +23,7 @@
     "pack:all": "npm pack --workspaces --pack-destination dist-packages"
   },
   "devDependencies": {
-    "@types/node": "^22.10.0",
+    "@types/node": "^26.6.4",
     "postgres": "^3.4.7",
     "typescript": "^5.9.3"
   }
