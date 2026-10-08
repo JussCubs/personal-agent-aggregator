@@ -28,6 +28,7 @@ export const LIMITS = {
   snapshotItems: 200,
   connectedApps: 50,
   openQuestionsPerConnection: 100,
+  connectionsPerOwner: 50,
   workItemsPerConnection: 5000,
   checkpointsPerConnection: 20000,
   activeJobsPerConnection: 20,

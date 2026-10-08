@@ -505,7 +505,9 @@ export async function handleMcpHttp(req: McpHttpRequest, opts: McpServerOptions)
   } catch (error) {
     const safe = toAggregatorError(error);
     if (safe.details?.callback_error) return fail(-32015, "Callback endpoint error", { reason: safe.details.reason ?? "challenge_failed" });
-    if (safe.code === "rate_limited") return fail(-32000, safe.message, undefined, 429);
+    if (safe.code === "rate_limited") {
+      return json(429, rpcError(message.id, -32000, safe.message, { retry_after: safe.details?.retry_after ?? 60 }), { "retry-after": String(safe.details?.retry_after ?? 60) });
+    }
     if (safe.code === "invalid_request" || safe.code === "insufficient_scope" || safe.code === "not_found") return fail(-32602, safe.message, safe.toJSON().error);
     opts.onError?.(error, { method });
     return fail(-32603, "Internal error");

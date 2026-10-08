@@ -74,7 +74,7 @@ export interface OwnerPrincipal {
   name?: string | null;
   /** Client surface recorded with answers: "web", "desktop", "mobile", "cli", ... */
   surface?: string | null;
-  /** The person actually acting, when a host lets one account act for another (delegation, QA mirrors). Audited. */
+  /** The person actually acting, when a host lets one account act for another (delegated, test or support accounts). Audited. */
   actorId?: string | null;
 }
 
@@ -152,7 +152,8 @@ export interface TokenResponse {
 
 type After = Array<() => void | Promise<void>>;
 
-const RETRY_DELAYS_SECONDS = [15, 60, 300, 900, 3600, 3 * 3600, 6 * 3600, 12 * 3600];
+/** Delay after each failed attempt; the attempt after the last delay is final (8 attempts in all). */
+const RETRY_DELAYS_SECONDS = [15, 60, 300, 900, 3600, 3 * 3600, 6 * 3600];
 const FORBIDDEN_HEADER_NAMES = new Set([
   "host", "content-length", "content-type", "transfer-encoding", "connection", "upgrade", "te", "trailer", "keep-alive",
   "proxy-authorization", "cookie", "user-agent", "webhook-id", "webhook-timestamp", "webhook-signature", "x-mcp-subscription-id",
@@ -1124,7 +1125,7 @@ export class AggregatorService {
     const now = this.now().toISOString();
     return await this.scoped(this.ownerScope(o), async (db) => {
       const count = await db.query(`SELECT count(*) AS n FROM ${this.t("connections")} WHERE owner_id = $1 AND status <> 'revoked'`, [o.ownerId]);
-      if (asNumber(count[0]?.n) >= 50) throw new AggregatorError("limit_exceeded", "at most 50 connections per owner");
+      if (asNumber(count[0]?.n) >= LIMITS.connectionsPerOwner) throw new AggregatorError("limit_exceeded", `at most ${LIMITS.connectionsPerOwner} connections per owner`);
       const id = newUuid();
       const rows = await db.query(
         `INSERT INTO ${this.t("connections")} (id, owner_id, provider, display_name, mode, status, scopes, event_seq, settings, created_at, updated_at)
@@ -1887,7 +1888,7 @@ export class AggregatorService {
           failed += 1;
           await db.query(`UPDATE ${this.t("deliveries")} SET status = 'failed', attempts = $2, last_status = 410, last_error = 'gone' WHERE id = $1`, [row.id, attempts]);
           if (row.kind === "mcp_event") await db.query(`DELETE FROM ${this.t("destinations")} WHERE id = $1`, [row.destination_id]);
-        } else if (outcome.kind === "final" || attempts >= RETRY_DELAYS_SECONDS.length) {
+        } else if (outcome.kind === "final" || attempts > RETRY_DELAYS_SECONDS.length) {
           failed += 1;
           await db.query(`UPDATE ${this.t("deliveries")} SET status = 'failed', attempts = $2, last_status = $3, last_error = $4 WHERE id = $1`, [row.id, attempts, outcome.status ?? null, outcome.error]);
         } else {
@@ -1978,7 +1979,12 @@ export class AggregatorService {
       await db.query(`DELETE FROM ${this.t("deliveries")} WHERE status <> 'pending' AND created_at < $1`, [cutoff]);
       const rows = await db.query(`DELETE FROM ${this.t("events")} WHERE created_at < $1 AND NOT EXISTS (SELECT 1 FROM ${this.t("deliveries")} d WHERE d.connection_id = ${this.t("events")}.connection_id AND d.event_seq = ${this.t("events")}.seq AND d.status = 'pending') RETURNING seq`, [cutoff]);
       await db.query(`DELETE FROM ${this.t("destinations")} WHERE expires_at IS NOT NULL AND expires_at < $1`, [now.toISOString()]);
-      await db.query(`DELETE FROM ${this.t("oauth_requests")} WHERE expires_at < $1 AND status IN ('pending','denied','exchanged','expired')`, [new Date(now.getTime() - 86_400_000).toISOString()]);
+      const dayAgo = new Date(now.getTime() - 86_400_000).toISOString();
+      await db.query(
+        `DELETE FROM ${this.t("oauth_requests")} WHERE (expires_at < $1 AND status IN ('pending','denied','exchanged','expired'))
+           OR (status = 'approved' AND code_expires_at IS NOT NULL AND code_expires_at < $1)`,
+        [dayAgo],
+      );
       const weekAgo = new Date(now.getTime() - 7 * 86_400_000).toISOString();
       await db.query(`DELETE FROM ${this.t("credentials")} WHERE expires_at IS NOT NULL AND expires_at < $1`, [weekAgo]);
       await db.query(`DELETE FROM ${this.t("credentials")} WHERE revoked_at IS NOT NULL AND revoked_at < $1`, [weekAgo]);

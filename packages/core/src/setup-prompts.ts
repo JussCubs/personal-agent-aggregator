@@ -129,7 +129,7 @@ ${c} help >/dev/null && echo PASS || echo FAIL
 The owner gave you a one-time setup code (it looks like \`ABCDE-FGHIJ-KLMNO-PQRST\` and expires in 15 minutes). Exchange it; the credential goes straight into a private file (mode 0600), never into chat:
 
 \`\`\`sh
-${c} setup --claim '<SETUP-CODE>'
+${c} setup --claim '<SETUP-CODE>' --server '${input.apiBaseUrl}'
 \`\`\`
 
 If you keep credentials in a vault instead, run \`${c} setup --claim '<SETUP-CODE>' --print-token\`, store the printed value in the vault, and export it as \`${prefix}_TOKEN\` when running ${c}.

@@ -14,7 +14,7 @@ const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 // C0 controls except tab/newline/carriage return, DEL, C1 controls.
 const CONTROL_CHARS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/g;
 // Bidirectional overrides and isolates can make displayed text differ from stored text.
-const BIDI_CONTROLS = /[‪-‮⁦-⁩‎‏؜]/g;
+const BIDI_CONTROLS = /[\u202A-\u202E\u2066-\u2069\u200E\u200F\u061C]/g;
 
 export type Raw = Record<string, unknown>;
 
