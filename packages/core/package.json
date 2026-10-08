@@ -1,6 +1,6 @@
 {
   "name": "@agent-aggregator/core",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Protocol, storage and security core for aggregating personal AI agents: work items, checkpoints, questions, answers and handoff jobs over REST, MCP (2025 and 2026-07-28) and signed webhooks.",
   "license": "Apache-2.0",
   "type": "module",

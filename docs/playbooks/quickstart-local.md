@@ -34,7 +34,7 @@ no errors.
 Check:
 
 ```sh
-test "$(npx agg-server --version)" = "0.2.0" && echo PASS || echo FAIL
+test "$(npx agg-server --version)" = "0.2.1" && echo PASS || echo FAIL
 ```
 
 ## 3. Run the demo (optional, 10 seconds)
@@ -105,7 +105,7 @@ npx agg-server
 Expected first line:
 
 ```text
-{"ts":"...","level":"info","msg":"listening","url":"http://127.0.0.1:8787","mcp":"http://127.0.0.1:8787/mcp","agent_api":"http://127.0.0.1:8787/api/v1","owner_api":"http://127.0.0.1:8787/owner","version":"0.2.0","storage":"sqlite","sqlite_path":"./data/aggregator.db",...}
+{"ts":"...","level":"info","msg":"listening","url":"http://127.0.0.1:8787","mcp":"http://127.0.0.1:8787/mcp","agent_api":"http://127.0.0.1:8787/api/v1","owner_api":"http://127.0.0.1:8787/owner","version":"0.2.1","storage":"sqlite","sqlite_path":"./data/aggregator.db",...}
 ```
 
 Leave it running. Every request is logged as one JSON line without

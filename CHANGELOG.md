@@ -7,6 +7,18 @@ date-based version (`CONTRACT_VERSION`), listed with each release.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-08
+
+Contract version `2026-10-08` (unchanged).
+
+### Fixed
+
+- Tool descriptions: `check_messages` names its id field `id` (as returned),
+  `post_message`/`acknowledge_message` say which id to pass, and
+  `check_messages`/`check_inbox` disclose the read receipt they record (a new
+  owner message they return is marked `delivered`) instead of claiming to be
+  read-only.
+
 ## [0.2.0] - 2026-10-08
 
 Contract version `2026-10-08`.
@@ -89,6 +101,7 @@ Contract version `2026-10-01`.
   secrets, and playbooks for local use, Postgres and Supabase deployment, RLS
   verification, connecting each kind of agent, rotation and incident response.
 
-[Unreleased]: ../../compare/v0.2.0...HEAD
+[Unreleased]: ../../compare/v0.2.1...HEAD
+[0.2.1]: ../../compare/v0.2.0...v0.2.1
 [0.2.0]: ../../compare/v0.1.0...v0.2.0
 [0.1.0]: ../../releases/tag/v0.1.0

@@ -1,6 +1,6 @@
 {
   "name": "@agent-aggregator/server",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Reference server for the personal agent aggregator: agent REST API, MCP endpoint, OAuth authorization server, owner API and signed-delivery worker on node:http.",
   "license": "Apache-2.0",
   "type": "module",
@@ -34,7 +34,7 @@
     "test": "node --test --experimental-sqlite tests/*.test.mjs"
   },
   "dependencies": {
-    "@agent-aggregator/core": "0.2.0",
+    "@agent-aggregator/core": "0.2.1",
     "postgres": "^3.4.7"
   }
 }

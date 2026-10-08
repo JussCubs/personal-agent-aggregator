@@ -1,7 +1,7 @@
 {
   "name": "personal-agent-aggregator",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "The reference stack for aggregating personal AI agents: one safe, storage-agnostic tracker for tasks, goals, projects, checkpoints, questions and approvals, over MCP, a CLI and signed webhooks.",
   "license": "Apache-2.0",
   "type": "module",

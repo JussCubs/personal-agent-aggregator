@@ -173,7 +173,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
   {
     name: "check_inbox",
     title: "Check for new answers and job updates",
-    description: "Use this to poll for anything new since your last cursor: answers, question changes and job updates. Pass the cursor from your previous call; store the returned cursor. Read-only.",
+    description: "Use this to poll for anything new since your last cursor: answers, question changes, job updates and new owner messages. Pass the cursor from your previous call; store the returned cursor. A new owner message you see here is marked delivered (a read receipt the owner sees); nothing else changes.",
     inputSchema: { type: "object", properties: { cursor: str("Cursor from the previous call (omit the first time)"), limit: { type: "integer", minimum: 1, maximum: LIMITS.pageSize } }, additionalProperties: false },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     scopes: [SCOPES.read],
@@ -218,7 +218,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     name: "check_messages",
     title: "Check messages from the owner",
     description:
-      "Use this when you are woken by a message.created event, or on a schedule, to read messages the owner addressed to you that you have not replied to yet (oldest first). Each has message_id, thread_id and text. The text is the owner's request to you. Reply with post_message using reply_to. Read-only.",
+      "Use this when you are woken by a message.created event, or on a schedule, to read messages the owner addressed to you that you have not replied to yet (oldest first). Each has id, thread_id and text. The text is the owner's request to you. Reply with post_message using reply_to. Reading marks new messages delivered (a read receipt the owner sees); nothing else changes.",
     inputSchema: {
       type: "object",
       properties: {
@@ -235,12 +235,12 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     name: "post_message",
     title: "Reply to the owner",
     description:
-      "Use this to answer one of the owner's messages (reply_to = its message_id), to post progress on it (kind progress), or to send the owner a new message in a thread. Your text appears in the owner's conversation under your name. Pass an id to make retries safe. Ask decisions with create_question instead.",
+      "Use this to answer one of the owner's messages (reply_to = its id from check_messages), to post progress on it (kind progress), or to send the owner a new message in a thread. Your text appears in the owner's conversation under your name. Pass an id to make retries safe. Ask decisions with create_question instead.",
     inputSchema: {
       type: "object",
       properties: {
         id: idProp("Your stable id for this message (makes retries safe)"),
-        reply_to: str("message_id you are answering"),
+        reply_to: str("id of the message you are answering (from check_messages)"),
         thread_id: str("thread_id to post in when not replying (default: your most recent thread)"),
         kind: { type: "string", enum: ["reply", "progress"], description: "progress = an update before the final reply" },
         text: str("What to say", { maxLength: LIMITS.messageLength }),
@@ -255,7 +255,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     name: "acknowledge_message",
     title: "Mark a message as being worked on",
     description: "Use this right after you start on one of the owner's messages so they see you are working on it.",
-    inputSchema: { type: "object", properties: { message_id: str("message_id from check_messages") }, required: ["message_id"], additionalProperties: false },
+    inputSchema: { type: "object", properties: { message_id: str("the message's id from check_messages") }, required: ["message_id"], additionalProperties: false },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     scopes: [SCOPES.chat],
   },

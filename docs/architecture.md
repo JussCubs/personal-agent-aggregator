@@ -154,7 +154,7 @@ intended for one owner on one machine.
 `agg ask --id q1 --prompt "Ship it?"` from an agent with a shell:
 
 1. The CLI sends `POST /api/v1/questions` with `Authorization: Bearer agg_...`
-   and `User-Agent: agent-aggregator-cli/0.2.0`.
+   and `User-Agent: agent-aggregator-cli/0.2.1`.
 2. The server checks the per-IP failed-authentication block, reads at most
    256 KiB, parses JSON, and passes `/v1/questions` to the core REST handler.
 3. `authenticate` hashes the credential and looks the digest up in a

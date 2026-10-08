@@ -59,7 +59,7 @@ cd /opt/personal-agent-aggregator && sudo npm ci && sudo npm run build
 Check:
 
 ```sh
-test "$(node /opt/personal-agent-aggregator/packages/server/bin/agg-server.js --version)" = "0.2.0" && echo PASS || echo FAIL
+test "$(node /opt/personal-agent-aggregator/packages/server/bin/agg-server.js --version)" = "0.2.1" && echo PASS || echo FAIL
 ```
 
 ## 4. Write the environment file
