@@ -7,6 +7,10 @@ date-based version (`CONTRACT_VERSION`), listed with each release.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-08
+
+Contract version `2026-10-08`.
+
 ### Added
 
 - Conversation bridge in `@agent-aggregator/core`: per-connection threads
@@ -85,5 +89,6 @@ Contract version `2026-10-01`.
   secrets, and playbooks for local use, Postgres and Supabase deployment, RLS
   verification, connecting each kind of agent, rotation and incident response.
 
-[Unreleased]: ../../compare/v0.1.0...HEAD
+[Unreleased]: ../../compare/v0.2.0...HEAD
+[0.2.0]: ../../compare/v0.1.0...v0.2.0
 [0.1.0]: ../../releases/tag/v0.1.0

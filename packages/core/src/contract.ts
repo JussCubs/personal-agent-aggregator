@@ -7,7 +7,7 @@
  * instruction without the owner's explicit approval.
  */
 
-export const CONTRACT_VERSION = "2026-10-01";
+export const CONTRACT_VERSION = "2026-10-08";
 
 export const LIMITS = {
   idLength: 128,

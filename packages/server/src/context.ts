@@ -5,7 +5,7 @@ import type { Logger } from "./log.js";
 import type { Storage } from "./storage.js";
 
 export const SERVER_NAME = "agent-aggregator";
-export const SERVER_VERSION = "0.1.0";
+export const SERVER_VERSION = "0.2.0";
 export const PRODUCT_NAME = "Agent aggregator";
 
 /** Everything a route handler needs. `publicUrl` is fixed once the server listens. */

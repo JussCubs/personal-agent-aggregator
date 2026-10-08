@@ -27,7 +27,7 @@ event fields are measured from events the service actually emits.
 ## Versions
 
 <!-- BEGIN GENERATED: version -->
-Contract version `2026-10-01` (`CONTRACT_VERSION`, returned by `whoami` / `GET /v1/me` as `contract_version`). MCP protocol versions: `2026-07-28` (modern) and `2025-11-25`, `2025-06-18`, `2025-03-26`, `2024-11-05` (legacy `initialize`).
+Contract version `2026-10-08` (`CONTRACT_VERSION`, returned by `whoami` / `GET /v1/me` as `contract_version`). MCP protocol versions: `2026-07-28` (modern) and `2025-11-25`, `2025-06-18`, `2025-03-26`, `2024-11-05` (legacy `initialize`).
 <!-- END GENERATED: version -->
 
 ## Credentials and audiences
