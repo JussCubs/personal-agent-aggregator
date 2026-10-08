@@ -299,9 +299,11 @@ tables too; the roles are cluster-level and are recreated by `migrate`.
 | What | How | What remains |
 | --- | --- | --- |
 | One work item | `DELETE /v1/work-items/{id}` (agent) | Only the `work_items` row is deleted: checkpoints, questions and jobs that reference it, and its earlier audit entries, stay; one `work_item.delete` audit entry is added |
-| One connection and everything it produced | `agg-owner connection delete --id <id> --yes` | One `connection.delete` audit entry with row counts |
+| One connection and everything it produced | `agg-owner connection delete --id <id> --yes` | One `connection.delete` audit entry with row counts (including `threads` and `messages`) |
+| One conversation | `DELETE FROM aggregator_threads WHERE owner_id = '<owner id>' AND ref = '<conversation id>';` as the API role ([conversations](conversations.md#revocation-deletion-and-retention)) | Its messages are deleted with it; questions asked in it keep a `thread_id` that no longer resolves |
 | Disconnect without deleting | `agg-owner connection revoke --id <id>` | Every row except the webhook, subscriptions and their pending deliveries (deleted) and credentials (revoked, then pruned after 7 days), for the owner to review or delete later |
 | Old inbox events and deliveries | Automatic: the sweep deletes events and finished deliveries older than 30 days | Nothing |
+| Conversation threads and messages | Kept until the conversation or the connection is deleted | |
 | Old checkpoints and audit entries | Automatic: the sweep deletes them after 180 days | Nothing |
 | Spent credentials | Automatic: deleted 7 days after they expired, were revoked or were used (setup codes, refresh tokens) | Nothing |
 | An owner and all their data (Postgres) | SQL below | Nothing in the live database |

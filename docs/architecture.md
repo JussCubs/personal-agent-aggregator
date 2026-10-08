@@ -84,13 +84,16 @@ All tables share a prefix (`aggregator_` by default).
 | `events` | The inbox | `PRIMARY KEY (connection_id, seq)`; `id` is the event id |
 | `destinations` | Webhook (one per connection) and MCP event subscriptions | `signing_secret_enc`, `auth_header_value_enc`: encrypted |
 | `deliveries` | One per (destination, event) | `status`, `attempts`, `next_attempt_at` |
+| `threads` | Conversations between the owner and one connection | `UNIQUE (connection_id, ref)`: `ref` is the host's conversation id; `message_seq` orders its messages |
+| `messages` | Owner → agent and agent → owner messages | `body_enc`: encrypted; `status` (`queued` → `delivered` → `working` → `replied`, or `failed`); `UNIQUE (connection_id, direction, client_id)` for idempotent sends and posts |
 | `audit` | Who did what | `actor` is `agent`, `owner` or `system` |
 | `oauth_clients` | DCR and CIMD clients | Service-only |
 | `oauth_requests` | Pending authorizations and issued codes | `code_hash`, single-use status |
 
 Every child table except `audit` carries `(owner_id, connection_id)` with a
 composite foreign key to `connections (id, owner_id)` and `ON DELETE CASCADE`
-(deliveries additionally reference `destinations (id, connection_id)`). A row
+(deliveries additionally reference `destinations (id, connection_id)`,
+messages `threads (id, connection_id)`). A row
 can therefore never claim one owner while pointing at another owner's
 connection, and deleting a connection removes everything it produced. Audit
 rows have no foreign key so the record of a deletion can outlive the
@@ -167,8 +170,8 @@ intended for one owner on one machine.
 ## Events and delivery
 
 When an event is due (the owner answers, dismisses a question, decides a
-job or reports progress; a sweep expires a question; an agent creates a
-handoff), the service, in the same transaction:
+job, reports progress or sends a message; a sweep expires a question; an
+agent creates a handoff), the service, in the same transaction:
 
 1. increments `connections.event_seq` (the row update serializes concurrent
    writers on that connection, so sequence numbers have no gaps and commit in
@@ -188,7 +191,13 @@ worker (every 2 s, or immediately when woken):
    SSRF-guarded client,
 4. records `delivered`, schedules a retry with backoff, or marks it failed.
 
-Every 60 s the sweep expires due questions (emitting `question.updated`)
+An owner message (`message.created`) also moves to `delivered` when a
+delivery of it succeeds or the agent reads it from the inbox, and the
+`messageStatusChanged` hook reports that after commit
+([conversations](conversations.md)).
+
+Every 60 s the sweep expires due questions (emitting `question.updated`),
+fails owner messages nobody picked up (20 minutes) or answered (120 minutes),
 and prunes: delivered/failed deliveries and events older than 30 days
 (events with a pending delivery are kept); checkpoints and audit entries
 older than 180 days; expired subscriptions; OAuth requests a day after they

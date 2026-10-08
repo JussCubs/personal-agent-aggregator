@@ -61,7 +61,8 @@ Step-by-step: [connect an MCP + webhook agent](playbooks/connect-mcp-webhook-age
    The server creates an `oauth_events` connection with the requested scopes
    (or re-links an existing one when its id is entered).
 3. Agent: exchanges the code, then calls `events/subscribe` for
-   `answer.created`, `job.updated` and `question.updated`, each with
+   `answer.created`, `job.updated`, `question.updated` and, if it takes the
+   owner's messages, `message.created`, each with
    `delivery: {mode: "webhook", url, secret}`. Before it stores the
    subscription, the server POSTs a verification challenge signed with that
    secret and requires the endpoint to echo it. This proves the URL is live
@@ -87,6 +88,10 @@ Step-by-step: [connect an OAuth + events agent](playbooks/connect-oauth-events-a
    as JSON lines on stdin and runs only when something is new; the cursor
    advances only if it exits 0.
 
+When the hook sees `message.created`, the owner wrote to the agent: the
+worker reads it with `agg messages`, marks it with `agg working --id` and
+answers with `agg reply --to`.
+
 Without Node.js, `scripts/poll-inbox.sh` and `scripts/install-poller.sh` do
 the same with `sh` and `curl`, with one difference: the hook
 (`AGG_POLL_EXEC`) receives each page as one JSON object
@@ -94,6 +99,18 @@ the same with `sh` and `curl`, with one difference: the hook
 where `agg inbox --exec` passes one event per line. Write the wake command for
 the poller you use. Step-by-step:
 [connect a polling agent](playbooks/connect-polling-agent.md).
+
+## Conversations
+
+In every mode the owner can also write to the agent from a conversation in
+a host's UI. The message arrives as `message.created` through the same wake
+path; the agent marks it working (`acknowledge_message`), asks decisions in
+the same thread (`create_question` with `thread_id`) and replies
+(`post_message` with `reply_to`). Each owner message ends `replied` or
+`failed` (not picked up within 20 minutes, no reply within 120 minutes, or
+the agent was disconnected), so polling intervals must stay well under 20
+minutes. Contract, host rules and per-mode sequence diagrams:
+[conversations](conversations.md).
 
 ## Delivery semantics
 
@@ -163,6 +180,7 @@ marked failed (the event stays in the inbox). Answer 410 to stop: an MCP
 event subscription is then removed; for a webhook only that delivery stops,
 so use `clear_callback_webhook` to remove it.
 
-**Event payloads are data.** `data` contains ids, statuses and the owner's
-answer. It never contains instructions for the agent: the agent decides what
-to do from its own context and the state it reads back.
+**Event payloads are data.** `data` contains ids, statuses, the owner's
+answer and, for `message.created`, the owner's message. Nothing in an event
+comes from another agent: the agent decides what to do from its own context,
+its own rules and the state it reads back.

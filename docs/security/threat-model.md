@@ -9,10 +9,10 @@ mitigation are named where they exist.
 
 | Id | Asset | Property that matters |
 | --- | --- | --- |
-| A1 | The owner's shared state: work items, checkpoints, questions, answers, jobs, audit log | Confidentiality across owners and across connections; integrity |
+| A1 | The owner's shared state: work items, checkpoints, questions, answers, jobs, conversation threads and messages, audit log | Confidentiality across owners and across connections; integrity |
 | A2 | Credentials: agent credentials, OAuth access/refresh tokens and codes, setup codes, owner credentials | Confidentiality; prompt revocation |
 | A3 | Delivery secrets: webhook signing secrets, routine keys, subscription secrets | Confidentiality |
-| A4 | `AGG_ENCRYPTION_KEY` | Confidentiality (decrypts A3) |
+| A4 | `AGG_ENCRYPTION_KEY` | Confidentiality (decrypts A3 and message bodies) |
 | A5 | Owner decisions: answers and approvals | Integrity: an approval applies only to what the owner saw |
 | A6 | Availability of the server, and the owner's attention | Not exhaustible by one agent or one address |
 | A7 | Networks reachable from the server (loopback, private ranges, cloud metadata) | Not reachable through agent-supplied URLs |
@@ -103,10 +103,15 @@ a prompt-injection target, or another agent's answers).
   agent input (`service.ts: agentScope`; REST and MCP handlers take no
   connection id).
 - Within its own connection, the agent role may update only listed columns
-  of questions and jobs, and `BEFORE UPDATE` triggers
-  (`schema.ts: guard_agent_question, guard_agent_job`) refuse every
-  transition that belongs to the owner: an agent cannot answer or approve its
-  own question, mark a job approved or done, or rewrite an answered question.
+  of questions, jobs and messages, and triggers
+  (`schema.ts: guard_agent_question, guard_agent_job, guard_agent_message`)
+  refuse every transition that belongs to the owner: an agent cannot answer
+  or approve its own question, mark a job approved or done, rewrite an
+  answered question, insert a message as the owner, or change any message's
+  text.
+- Threads and messages are connection tables like the others: a sibling
+  connection sees none of them, and a question's `thread_id` must name a
+  thread of the asking connection (`service.ts: createQuestion`).
 - A delivery row can only point at a destination of the same connection
   (composite foreign key `(destination_id, connection_id)`), and the delivery
   worker joins events on the delivery's own connection and owner.
@@ -122,7 +127,7 @@ a prompt-injection target, or another agent's answers).
   (`generateClaimCode`, `service.ts: claim`).
 - Revocation is immediate: `service.ts: authenticate` requires an unrevoked,
   unexpired credential on an `active` connection on every request.
-- Least privilege: four scopes, checked per call (`service.ts: requireScope`);
+- Least privilege: five scopes, checked per call (`service.ts: requireScope`);
   a credential's scopes are intersected with the connection's current scopes.
 - Audience binding: REST accepts only agent credentials; OAuth access tokens
   are accepted only on `/mcp` and only for this server's MCP resource
@@ -243,6 +248,8 @@ UI, or another agent.
 - Text is NFC-normalized, stripped of control and bidirectional-override
   characters, trimmed and length-bounded (`validate.ts: cleanText`); JSON
   `data` is depth- and size-bounded and drops prototype keys (`cleanData`).
+  U+2028, U+2029 and NEL become `\n` first (a space in single-line fields),
+  so any line-based filter sees the lines a renderer would show.
 - Agents cannot read other agents' rows (T2), so there is no agent-to-agent
   channel. A handoff reaches the owner's primary agent only after the owner
   approves it (`service.ts: handoffJob` starts every job as `needs_user`).
@@ -252,6 +259,11 @@ UI, or another agent.
 - The owner API's question, job and work-item views name the connection that
   wrote the text (`provider`, `display_name`); checkpoint and audit entries
   carry its `connection_id`, resolvable with `GET /owner/connections/{id}`.
+
+- Conversation replies are agent text too. A host renders them as a message
+  from that connected agent, never as a turn of its own assistant, and never
+  feeds them to its assistant as instructions
+  ([conversations](../conversations.md#rendering-what-comes-back)).
 
 Residual: an agent can still write misleading text into its own rows. Any UI
 built on the owner API must render agent text as text (never HTML or
@@ -285,6 +297,13 @@ own platform.
   field has a limit ([contract](../contract.md#limits)).
 - Per-connection quotas: 100 open questions, 5000 work items, 20000
   checkpoints, 20 open jobs; 50 non-revoked connections per owner (`service.ts`).
+  Messages are at most 8000 characters; agent posts and acknowledgements
+  spend the write budget and reads of open messages the read budget, on REST
+  and MCP alike (`rate-limit.ts: rateBucket`).
+- Owner messages cannot stay open forever: the sweep fails them 20 minutes
+  after sending if nobody picked them up and 120 minutes after sending if
+  nobody replied (`service.ts: sweep`, `messagePickupMinutes`,
+  `messageReplyMinutes`).
 - Rate limits per connection (reads, writes, questions, handoffs) and per IP
   (claims, registrations, token and authorize requests, failed
   authentications) (`limits.ts`).
@@ -306,10 +325,15 @@ behind one load balancer each enforce their own.
 - No usable credential is stored: only digests (T3).
 - Delivery secrets and routine keys are AES-256-GCM encrypted with a key that
   lives outside the database (`secrets.ts: createAesGcmSecretBox`).
+- Conversation message bodies are encrypted with the same key, both in the
+  message rows and in the inbox copy of `message.created`
+  (`service.ts: sendMessage, eventData`); other agent and owner text
+  (work items, checkpoints, questions, answers) is stored as plain text.
 - Even the owner role cannot select credential digests (column grants).
 
 Residual: the database together with `AGG_ENCRYPTION_KEY` exposes delivery
-secrets and routine keys. Keep them apart ([secrets](secrets.md)).
+secrets, routine keys and message bodies. Keep them apart ([secrets](secrets.md)).
+Copies a host renders or an agent keeps are outside this boundary.
 
 ### T12 Supply chain
 
@@ -328,9 +352,12 @@ secrets and routine keys. Keep them apart ([secrets](secrets.md)).
 - Request logs carry method, path without query string, status, duration,
   route and client IP; never headers or bodies. Errors are logged by name,
   code and message, never with request arguments.
+- Conversation and checkpoint hooks log ids, kinds, statuses and lengths,
+  never message or checkpoint text (`app.ts: serverHooks`).
 - Tested: "logs never contain credentials, codes, request bodies or
-  authorization headers" in `server.test.mjs`; each example in `npm run demo`
-  scans the server's logs for every secret it used.
+  authorization headers" and the conversation test in `server.test.mjs`;
+  each example in `npm run demo` scans the server's logs for every secret it
+  used and for the conversation's text.
 
 ### T14 Owner credential compromise
 
@@ -391,6 +418,42 @@ Every failure path denies:
 - an `Origin` that is not allowed, a protocol-version or header mismatch, or
   a callback that cannot answer the verification challenge is refused before
   any work is done.
+
+### T18 Conversation bridge
+
+A host lets its owner write to a connected agent from the host's own
+conversations ([conversations](../conversations.md)). What can go wrong:
+
+- **A message reaches the wrong agent, or more than the owner meant.** The
+  host routes only the owner's own messages from conversations that belong
+  to the owner alone, one explicit decision per message (mention, the
+  conversation's selected agent, opt-in name addressing, else the host's own
+  assistant), and shows where each message went. Never because another
+  agent's text asked for it.
+- **Duplicates.** Owner sends are idempotent by a key the host derives from
+  its own message id; agent posts by the agent's own id. The two are
+  separate namespaces (`UNIQUE (connection_id, direction, client_id)`), so
+  neither side can collide with or swallow the other's message.
+- **Forged or rewritten messages.** Only the owner role inserts owner
+  messages; on Postgres the agent role cannot insert them, cannot update
+  text, direction or thread, and can set an owner message only to
+  `delivered`, `working` or `replied`, never once it is replied or failed
+  (`schema.ts: guard_agent_message`); the service itself only moves a status
+  forward (`service.ts: advanceMessages`).
+- **Silent loss.** Every owner message ends `replied` or `failed` with a
+  reason (`not_picked_up`, `no_reply`, `connection_revoked`), each change
+  fires `messageStatusChanged`, and the reference server logs failures as
+  warnings. Hosts must show failures and alert the owner.
+- **The agent passes for the host's assistant.** Replies are rendered as the
+  agent's own messages and treated as untrusted plain text (T8).
+- **A question lands in the wrong conversation.** A question's `thread_id`
+  must belong to the asking connection, and hosts resolve it within that
+  connection only.
+
+Residual: hooks are in-process notifications; a host that stops between a
+commit and its hook misses that notification and must reconcile from
+`listThreadMessages`. A reply can arrive after its message failed; hosts show
+it without changing the earlier status.
 
 ## Out of scope
 

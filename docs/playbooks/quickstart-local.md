@@ -47,7 +47,7 @@ Expected: a table of steps for `mcp-webhook`, `oauth-events` and `cli-poll`,
 each `PASS`, ending with:
 
 ```text
-PASS: 50 checks, 50 passed, 0 failed
+PASS: 65 checks, 65 passed, 0 failed
 ```
 
 Check:
@@ -147,7 +147,7 @@ npx agg setup --claim "$CODE" --server http://127.0.0.1:8787/api
 Expected:
 
 ```text
-{"ok":true,"connection":{"id":"<CONN>","provider":"my_shell_agent","display_name":"My shell agent","mode":"cli_poll"},"scopes":["hub:read","hub:write","hub:ask","hub:handoff"],"stored":"<home>/.config/agent-aggregator/hub.json"}
+{"ok":true,"connection":{"id":"<CONN>","provider":"my_shell_agent","display_name":"My shell agent","mode":"cli_poll"},"scopes":["hub:read","hub:write","hub:ask","hub:handoff","hub:chat"],"stored":"<home>/.config/agent-aggregator/hub.json"}
 ```
 
 Check:

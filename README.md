@@ -34,6 +34,11 @@ signed, bound to the exact wording and action they approved.
   that was given to different wording.
 - **Handoffs.** An agent hands a goal to the owner's primary agent; nothing
   runs until the owner approves; progress flows back as `job.updated`.
+- **Conversations.** A host app lets its owner message a connected agent from
+  its own conversation UI: the message wakes the agent like any event, every
+  message shows `queued`, `delivered`, `working`, `replied` or `failed`, and
+  the agent asks and replies in the same thread. Bodies are encrypted at rest.
+  See [conversations](docs/conversations.md).
 - **Three wake modes.** MCP + signed webhook; OAuth-protected MCP with MCP
   Events; CLI or plain HTTPS polling a cursor-based inbox from cron.
   See [wake modes](docs/wake-modes.md).
@@ -111,7 +116,7 @@ git clone <repository-url> personal-agent-aggregator
 cd personal-agent-aggregator
 npm ci
 npm run build
-npm run demo                       # PASS: 50 checks, 50 passed, 0 failed
+npm run demo                       # PASS: 65 checks, 65 passed, 0 failed
 ```
 
 Run your own server:
@@ -154,6 +159,7 @@ The step-by-step version with a PASS/FAIL check per step is
 - [Architecture](docs/architecture.md): components, data model, request and delivery flow.
 - [Contract](docs/contract.md): REST routes, MCP tools and annotations, events, errors, CLIs, limits.
 - [Wake modes](docs/wake-modes.md): which mode to use, delivery semantics.
+- [Conversations](docs/conversations.md): letting the owner talk to a connected agent inside a host's UI (routing, statuses, timeouts, privacy, per-mode sequences).
 - [Storage](docs/storage.md): SQLite, Postgres, Supabase, other hosts, backups, deletion.
 - [Threat model](docs/security/threat-model.md) and [secrets](docs/security/secrets.md).
 - Playbooks: [quickstart](docs/playbooks/quickstart-local.md),

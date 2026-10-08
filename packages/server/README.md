@@ -18,6 +18,14 @@ agg-server doctor                # storage and isolation checks
 | `agg-server` | `start` (default), `keygen`, `migrate`, `doctor` |
 | `agg-owner` | Owner CLI for `/owner/*`, plus `init` and `reset-credential` with direct database access |
 
+Conversations: `agg-owner say <connection> "<text>" [--thread REF]` sends a
+connected agent a message (`POST /owner/connections/{id}/messages`) and
+`agg-owner thread <connection> [REF] [--wait SECONDS]` shows the thread with
+each message's status. The server logs `message_status`, `message_failed`
+(warning), `message_posted` and `checkpoint_posted` lines with ids only, and
+`createAggregatorServer(config, { hooks })` passes every service hook to an
+embedding host ([conversations](../../docs/conversations.md)).
+
 Configuration, endpoints and exit codes: [docs/contract.md](../../docs/contract.md);
 deployment: [docs/playbooks](../../docs/playbooks). Requires Node.js 22.5+.
 License: Apache-2.0.

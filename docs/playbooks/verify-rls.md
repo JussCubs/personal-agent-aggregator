@@ -46,12 +46,12 @@ between them; the check rows are:
 ```text
  check_name                                                 | result | detail
 ------------------------------------------------------------+--------+---------------------------------------------
- 1 rls_enabled_and_forced                                   | PASS   | 13 of 13 tables
+ 1 rls_enabled_and_forced                                   | PASS   | 15 of 15 tables
  2 scoped_roles_cannot_login_or_bypass                      | PASS   | aggregator_agent: login=false superuser=false bypassrls=false; aggregator_owner: ...
- 3 policies_present                                         | PASS   | 19 policies; agent on 9 connection tables, owner on 10
+ 3 policies_present                                         | PASS   | 23 policies; agent on 11 connection tables, owner on 12
  4 no_privileges_for_public_anon_authenticated_service_role | PASS   | none
- 5 column_boundaries                                        | PASS   | agents: no credentials, no encrypted secrets, cannot change scopes or status; ...
- 6 agent_guard_triggers_enabled                             | PASS   | aggregator_jobs_agent_guard on aggregator_jobs, aggregator_questions_agent_guard on ...
+ 5 column_boundaries                                        | PASS   | agents: no credentials, no encrypted secrets, cannot change scopes or status or rewrite message text; ...
+ 6 agent_guard_triggers_enabled                             | PASS   | aggregator_jobs_agent_guard on aggregator_jobs, aggregator_messages_agent_guard on ...
  7 unknown_agent_sees_no_rows | PASS   | 0 rows visible
  8 no_principal_sees_no_rows | PASS   | 0 rows visible as aggregator_owner
  9 owner_sees_only_own_connections | PASS   | 1 visible, 1 owned, 2 in total
@@ -63,10 +63,10 @@ What each check proves:
 | --- | --- |
 | 1 | Every aggregator table has RLS enabled and forced (forced applies it to the table owner too) |
 | 2 | The scoped roles cannot log in, are not superusers and cannot bypass RLS |
-| 3 | Agent policies exist on the 9 connection-scoped tables and owner policies on those plus `credentials` |
+| 3 | Agent policies exist on the 11 connection-scoped tables (including `threads` and `messages`) and owner policies on those plus `credentials` |
 | 4 | `PUBLIC`, `anon`, `authenticated` and `service_role` hold no privilege on any aggregator table |
-| 5 | Agents cannot read credentials or encrypted secrets or change their scopes or status; only the API role reads OAuth requests |
-| 6 | The triggers that stop the agent role from answering or approving are present and enabled |
+| 5 | Agents cannot read credentials or encrypted secrets, change their scopes or status, or rewrite a message's text or direction; only the API role reads OAuth requests |
+| 6 | The triggers that stop the agent role from answering, approving or posting as the owner are present and enabled |
 | 7 | An agent principal that matches no connection sees zero rows |
 | 8 | With no principal set, the owner role sees zero rows |
 | 9 | An owner principal sees exactly that owner's connections, not the others (positive control) |

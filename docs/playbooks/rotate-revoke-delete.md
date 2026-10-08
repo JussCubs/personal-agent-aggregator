@@ -114,7 +114,7 @@ reconnect the agent.
 npx agg-owner connection delete --id "$CONN" --yes
 ```
 
-Expected: `{"deleted":{"work_items":N,"checkpoints":N,"questions":N,"jobs":N,"events":N,"deliveries":N,"credentials":N}}`.
+Expected: `{"deleted":{"work_items":N,"checkpoints":N,"questions":N,"jobs":N,"events":N,"deliveries":N,"credentials":N,"threads":N,"messages":N}}`.
 The connection is revoked first, then every row it produced is deleted; one
 `connection.delete` audit entry with these counts remains (until the
 180-day history retention removes it).

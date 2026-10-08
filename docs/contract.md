@@ -127,6 +127,9 @@ Unknown paths return 404 `not_found`.
 | `GET /v1/jobs` | `?status=&limit=` | `{jobs}` |
 | `GET /v1/jobs/{id}` | none | `{job}` |
 | `POST /v1/jobs/{id}/cancel` | none | `{job}`; a no-op for terminal jobs |
+| `GET /v1/messages` | `?thread_id=&include_replied=true&limit=` (limit 1-100, default 20) | `{messages}`: the owner's messages to this agent that are not replied to yet (`queued`, `delivered`, `working`; all with `include_replied`), oldest first; reading moves `queued` ones to `delivered` |
+| `POST /v1/messages` | `{text, reply_to?, thread_id?, kind?, id?}` | 201 `{message, thread, created: true}`, or 200 `{..., created: false}` for a known `id` |
+| `POST /v1/messages/{id}/ack` | none | `{message}`; the owner's message moves to `working` (a no-op once replied or failed) |
 | `PUT /v1/webhook` | `{url, auth_header_name?, auth_header_value?}` | `{url, auth_header_name, signing_secret}` (the secret is returned only here) |
 | `DELETE /v1/webhook` | none | `{removed}` |
 
@@ -149,6 +152,8 @@ are upserted as work items of that kind (an entry without `id` gets
 `{id, label}`, default ids `opt_1`, `opt_2`, ...; approvals always get
 `approve` / `deny`), `allow_free_text` (default `true` for questions, `false`
 for approvals; a question needs options or free text), `work_item_id`,
+`thread_id` (a conversation thread of this connection: the question is shown
+there, see [conversations](conversations.md#questions-inside-a-conversation)),
 `affected_action`, `action_digest` (1-128 characters of
 `A-Z a-z 0-9 : _ = + / . -`), `urgency` (`low`, `normal`, `high`),
 `expires_at` (future, at most 31 days ahead) or `expires_in_seconds`
@@ -173,6 +178,24 @@ true, surface}`), `answered_at`, `acknowledged_at`.
 `status_reason` values set by the service: `awaiting_owner_approval`,
 `approved_by_owner`, `declined_by_owner`, `cancelled_by_agent`,
 `connection_revoked`; progress reports set their own `reason`.
+
+**Message** (conversation bridge, [conversations](conversations.md)):
+`id`, `thread_id`, `thread_ref` (the host's conversation id), `direction`
+(`to_agent` from the owner, `from_agent` from the agent), `kind` (`message`,
+`reply`, `progress`), `text` (plain text, at most `messageLength`
+characters, encrypted at rest), `reply_to`, `status`, `status_reason`,
+`created_at`, `delivered_at`, `working_at`, `replied_at`. An owner message
+moves `queued` → `delivered` → `working` → `replied`, or to `failed` with
+`status_reason` `not_picked_up` (still queued 20 minutes after it was sent),
+`no_reply` (no reply 120 minutes after it was sent) or `connection_revoked`;
+agent posts are `posted`. On `POST /v1/messages`, `reply_to` answers one of
+the owner's messages (`kind` defaults to `reply`; `progress` posts an
+interim update and marks the message `working`); without `reply_to`, the post
+goes to `thread_id`, or to the agent's most recently active thread. `id` is
+the agent's own idempotency key, separate from the owner's keys.
+
+**Thread**: `id`, `ref`, `title`, `created_at`, `updated_at`; one per
+(connection, `ref`).
 
 **Inbox**: `cursor` is opaque (`c1.` + base64url); omit it to read from the
 beginning. The response `cursor` is positioned after the last event returned;
@@ -249,7 +272,8 @@ the origin is `AGG_PUBLIC_URL`'s origin.
 
 Arguments mirror the REST bodies above (`get_answer`, `acknowledge_answer`
 and `cancel_question` take `question_id`; `get_job` and `cancel_job` take
-`job_id`). A tool result is
+`job_id`; `acknowledge_message` takes `message_id`; `check_messages` takes the
+`GET /v1/messages` query as arguments). A tool result is
 `{content: [{type: "text", text: <JSON>}], structuredContent: <object>, isError}`.
 A failed call returns `isError: true` with `structuredContent` = the core
 error object (`{error: {code, message, details?}}`); an `insufficient_scope`
@@ -280,7 +304,8 @@ the tool's scopes. Each tool also advertises
 `{name, arguments?, delivery: {mode: "webhook", url, secret}, ttlMs?, cursor?}`.
 
 - `arguments` filters deliveries: `{question_id}` for `answer.created` and
-  `question.updated`, `{job_id}` for `job.updated`.
+  `question.updated`, `{job_id}` for `job.updated`, `{thread_id}` for
+  `message.created`.
 - `secret` is chosen by the subscriber: `whsec_` + base64 of 24-64 bytes.
 - `ttlMs`: an integer from 1 ms to 365 days (anything else is refused with
   -32602), then clamped to 1 hour - 30 days; default 7 days; `null` means 30 days.
@@ -322,6 +347,9 @@ Events are appended per connection with a gap-free sequence number:
   "dismissed_by_owner"`) or it expired during a sweep (`reason: "expired"`).
 - `job.updated`: a handoff was created (`needs_user`), the owner approved or
   declined it, or the owner reported progress.
+- `message.created`: the owner sent the agent a message
+  (`POST /owner/connections/{id}/messages`). The stored inbox copy keeps the
+  text encrypted; inbox reads and deliveries carry it decrypted.
 
 An agent's own cancellations (`cancel_question`, `cancel_job`) emit no event.
 Nothing is emitted for a revoked connection.
@@ -397,7 +425,7 @@ Bodies:
 
 - `POST /owner/connections`: `provider` (`^[a-z][a-z0-9_]{1,39}$`),
   `display_name` (1-80 characters, single line), `mode` (`mcp_webhook`,
-  `oauth_events`, `cli_poll`), `scopes` (array; default all four),
+  `oauth_events`, `cli_poll`), `scopes` (array; default all five),
   `settings` (JSON object). `scopes` may be an array of scope names or one
   space- or comma-separated string; unknown names are ignored and at least
   one known scope is required. A new connection is `pending` until a credential
@@ -413,11 +441,18 @@ Bodies:
 - `.../progress`: `status` (`running`, `blocked`, `needs_user`, `done`,
   `failed`), `summary`, `reason` (at most 80 characters), `result` (JSON
   object). Refused (409) before approval and after a terminal status.
+- `.../messages` (POST): `text` (required), `thread_ref` (default
+  `default`; one line, at most `threadRefLength`), `thread_title` (used when
+  the thread is created), `idempotency_key` (id pattern; a known key returns
+  the stored message with 200 and `created: false`). 409 when the connection
+  is not active or lacks `hub:chat`. `GET .../messages` returns
+  `{messages}` for one `thread_ref`: the latest `limit` (default 50), oldest
+  first, with statuses. See [conversations](conversations.md).
 - `GET /owner/questions` defaults to `status=pending` and sorts high urgency
   first; `GET /owner/jobs` defaults to `status=open` (`needs_user`, `running`,
   `blocked`).
 - `DELETE /owner/connections/{id}` returns
-  `{deleted: {work_items, checkpoints, questions, jobs, events, deliveries, credentials}}`
+  `{deleted: {work_items, checkpoints, questions, jobs, events, deliveries, credentials, threads, messages}}`
   (row counts) and leaves one `connection.delete` audit entry.
 
 ## OAuth endpoints

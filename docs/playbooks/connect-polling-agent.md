@@ -28,7 +28,9 @@ echo "$CONN"
 ```
 
 Grant only the scopes the agent needs; add `--scope hub:handoff` if it should
-hand goals to your primary agent. Expected: a UUID.
+hand goals to your primary agent, and `--scope hub:chat` if you want to
+message it from a conversation ([conversations](../conversations.md)).
+Expected: a UUID.
 
 Check:
 

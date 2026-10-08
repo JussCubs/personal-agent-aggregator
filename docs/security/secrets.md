@@ -32,8 +32,9 @@ to rotate it.
   credentials apart.
 - **Encrypted (AES-256-GCM, random 96-bit IV per value, format
   `v1:<iv>:<tag>:<ciphertext>`):** everything the server has to *use* later —
-  webhook signing secrets, routine keys, subscription secrets. The key comes
-  only from `AGG_ENCRYPTION_KEY`.
+  webhook signing secrets, routine keys, subscription secrets — and the
+  bodies of conversation messages (in the message rows and in the inbox copy
+  of `message.created`). The key comes only from `AGG_ENCRYPTION_KEY`.
 - **Never stored:** plaintext credentials, codes and owner credentials (only
   shown once), verification challenges, CSRF tokens, request bodies in logs,
   `Authorization` headers.
@@ -78,7 +79,10 @@ one key. To rotate it:
    deliveries fail with `secret_unavailable` (final, not retried; events stay
    in the inbox). Set each webhook again (`set_callback_webhook` or
    `agg-owner webhook set`) and let OAuth clients re-subscribe.
-4. Destroy the old key.
+4. Stored conversation messages can no longer be decrypted: their `text`
+   reads as an empty string (statuses and ids are unaffected). Export any
+   conversation history you need before rotating.
+5. Destroy the old key.
 
 Consent forms open during the restart stop validating (the CSRF key is
 derived from the encryption key); reloading the page fixes it.

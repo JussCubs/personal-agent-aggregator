@@ -24,7 +24,7 @@ curl -fsS "$AGG_PUBLIC_URL/.well-known/oauth-authorization-server"
 Expected:
 
 ```text
-www-authenticate: Bearer resource_metadata="https://aggregator.example.com/.well-known/oauth-protected-resource/mcp", scope="hub:read hub:write hub:ask hub:handoff"
+www-authenticate: Bearer resource_metadata="https://aggregator.example.com/.well-known/oauth-protected-resource/mcp", scope="hub:read hub:write hub:ask hub:handoff hub:chat"
 {"resource":"https://aggregator.example.com/mcp","authorization_servers":["https://aggregator.example.com"],"scopes_supported":[...],"bearer_methods_supported":["header"],"resource_name":"Agent aggregator"}
 {"issuer":"https://aggregator.example.com","authorization_endpoint":".../oauth/authorize","token_endpoint":".../oauth/token","registration_endpoint":".../oauth/register","revocation_endpoint":".../oauth/revoke",...,"code_challenge_methods_supported":["S256"],...}
 ```
@@ -76,9 +76,10 @@ name (or `OAuth client at <host>`); rename it with
 
 ## 4. Client: subscribe to events
 
-The client calls `events/subscribe` for `answer.created`, `job.updated` and
-`question.updated` with `delivery: {mode: "webhook", url, secret}`. The
-server POSTs a signed `{"type":"verification","challenge":"..."}` to the URL
+The client calls `events/subscribe` for `answer.created`, `job.updated`,
+`question.updated` and (to take your messages) `message.created` with
+`delivery: {mode: "webhook", url, secret}`. The server POSTs a signed
+`{"type":"verification","challenge":"..."}` to the URL
 and stores the subscription only after the endpoint echoes the challenge.
 
 Check (owner):
